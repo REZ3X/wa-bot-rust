@@ -33,6 +33,12 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>) {
         return;
     }
 
+    if text_content == "h" {
+        log::info!("dispatch: 'h' command from {sender}");
+        commands::public::handle_h(&ctx).await;
+        return;
+    }
+
     if is_group && !is_allowed_group {
         return;
     }
@@ -52,6 +58,12 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>) {
     if text_content == "r" {
         log::info!("dispatch: 'r' command from {sender}");
         commands::public::handle_r(&ctx).await;
+        return;
+    }
+
+    if text_content == "d" || text_content.starts_with("d ") {
+        log::info!("dispatch: 'd' command from {sender}");
+        commands::public::handle_d(&ctx).await;
         return;
     }
 

@@ -26,6 +26,20 @@ pub async fn handle_g(ctx: &MessageContext) {
     }).await;
 }
 
+pub async fn handle_h(ctx: &MessageContext) {
+    let help_text = "Available commands:\n\
+                     g - Get group JID\n\
+                     h - Show this help message\n\
+                     s - Convert image/video to sticker (reply to media)\n\
+                     i - Convert sticker to image/video (reply to sticker)\n\
+                     r - Resend view-once media (reply to view-once message)\n\
+                     d - Download YouTube video ('d <url>' or reply with 'd' to a message containing a YouTube URL)";
+    let _ = ctx.send_message(wa::Message {
+        conversation: Some(help_text.to_string()),
+        ..Default::default()
+    }).await;
+}
+
 fn resize_into_sticker_canvas(image: &image::DynamicImage) -> image::DynamicImage {
     let (width, height) = image.dimensions();
     let scale = f32::min(
@@ -645,5 +659,130 @@ pub async fn handle_r(ctx: &MessageContext) {
             ),
             ..Default::default()
         }).await;
+    }
+}
+
+fn find_youtube_url(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .find(|word| word.contains("youtube.com/") || word.contains("youtu.be/"))
+        .map(|s| s.trim().to_string())
+}
+
+pub async fn handle_d(ctx: &MessageContext) {
+    let text = ctx.message
+        .text_content()
+        .or_else(|| ctx.message.get_caption())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let url = if text.starts_with("d ") {
+        find_youtube_url(text[2..].trim())
+    } else if text == "d" {
+        let mut quoted_url = None;
+        if let Some(ext) = ctx.message.extended_text_message.as_option() {
+            if let Some(ctx_info) = ext.context_info.as_option() {
+                if let Some(quoted) = ctx_info.quoted_message.as_option() {
+                    if let Some(conv) = quoted.conversation.as_ref() {
+                        quoted_url = find_youtube_url(conv);
+                    }
+                    if quoted_url.is_none() {
+                        if let Some(ext_text) = quoted.extended_text_message.as_option() {
+                            if let Some(text) = ext_text.text.as_ref() {
+                                quoted_url = find_youtube_url(text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        quoted_url
+    } else {
+        None
+    };
+
+    let url = match url {
+        Some(u) => u,
+        None => {
+            let _ = ctx.send_message(wa::Message {
+                conversation: Some(
+                    "Usage: 'd <YouTube URL>' or reply to a message containing a YouTube URL with 'd'.".to_string()
+                ),
+                ..Default::default()
+            }).await;
+            return;
+        }
+    };
+
+    let _ = ctx.send_message(wa::Message {
+        conversation: Some("Downloading video, please wait...".to_string()),
+        ..Default::default()
+    }).await;
+
+    let download_result = tokio::time::timeout(
+        Duration::from_secs(180),
+        async move {
+            let workdir = tempfile::tempdir()
+                .map_err(|e| anyhow::anyhow!("Failed to create temp dir: {e}"))?;
+            let parsed_url = rustube::url::Url::parse(&url)
+                .map_err(|e| anyhow::anyhow!("Invalid YouTube URL: {e}"))?;
+            let video = rustube::Video::from_url(&parsed_url).await
+                .map_err(|e| anyhow::anyhow!("Failed to get video info: {e}"))?;
+            let stream = video.streams().iter()
+                .find(|s| s.includes_video_track && s.includes_audio_track)
+                .or_else(|| video.best_quality())
+                .ok_or_else(|| anyhow::anyhow!("No suitable video stream found"))?;
+            let path = stream.download_to_dir(workdir.path()).await
+                .map_err(|e| anyhow::anyhow!("Failed to download video: {e}"))?;
+            let data = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to read downloaded file: {e}"))?;
+            anyhow::Ok(data)
+        }
+    ).await;
+
+    match download_result {
+        Ok(Ok(video_data)) => {
+            match ctx.client.upload(video_data, MediaType::Video, UploadOptions::default()).await {
+                Ok(upload) => {
+                    let reply = wa::Message {
+                        video_message: buffa::MessageField::some(wa::message::VideoMessage {
+                            url: Some(upload.url),
+                            direct_path: Some(upload.direct_path),
+                            media_key: Some(upload.media_key.to_vec()),
+                            file_sha256: Some(upload.file_sha256.to_vec()),
+                            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                            file_length: Some(upload.file_length),
+                            media_key_timestamp: Some(upload.media_key_timestamp),
+                            mimetype: Some("video/mp4".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    let _ = ctx.send_message(reply).await;
+                }
+                Err(e) => {
+                    log::error!("handle_d: video upload failed: {e:?}");
+                    let _ = ctx.send_message(wa::Message {
+                        conversation: Some("Failed to upload video.".to_string()),
+                        ..Default::default()
+                    }).await;
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            log::error!("handle_d: download failed: {e:?}");
+            let _ = ctx.send_message(wa::Message {
+                conversation: Some(format!("Failed to download video: {e}")),
+                ..Default::default()
+            }).await;
+        }
+        Err(_) => {
+            let _ = ctx.send_message(wa::Message {
+                conversation: Some(
+                    "Download timed out. The video may be too large or the URL may be invalid.".to_string()
+                ),
+                ..Default::default()
+            }).await;
+        }
     }
 }
