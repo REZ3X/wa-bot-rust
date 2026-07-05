@@ -216,14 +216,78 @@ fn animated_video_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     std::fs::read(&output_path).context("failed to read generated sticker")
 }
 
-/// Converts animated WebP sticker bytes into MP4 video bytes.
+/// Decodes an animated WebP sticker into individual frames (mirrors gif_to_webp's
+/// approach), since ffmpeg's own WebP decoder cannot read animated WebP (ANMF chunks).
 fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    ensure_ffmpeg_available()?;
+
+    let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(data)).context(
+        "failed to create webp decoder"
+    )?;
+    let (width, height) = decoder.dimensions();
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .context("failed to decode animated webp frames")?;
+
+    if frames.is_empty() {
+        anyhow::bail!("animated webp contained no frames");
+    }
+
+    log::info!("animated_webp_to_mp4: decoded {} frames ({width}x{height})", frames.len());
+
     let workdir = tempdir().context("failed to create temporary directory")?;
-    let input_path = workdir.path().join("input.webp");
+
+    let mut concat_manifest = String::new();
+    let last_index = frames.len() - 1;
+
+    for (i, frame) in frames.iter().enumerate() {
+        let left = frame.left();
+        let top = frame.top();
+        let delay_ms = Duration::from(frame.delay()).as_millis().clamp(10, 60_000) as u64;
+
+        // Composite onto a full-size canvas in case this frame only covers a
+        // sub-region (partial-frame updates), same as the GIF path does.
+        let mut full_frame = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+        image::imageops::overlay(&mut full_frame, frame.buffer(), left as i64, top as i64);
+
+        let filename = format!("frame_{i:05}.png");
+        let path = workdir.path().join(&filename);
+        full_frame
+            .save_with_format(&path, image::ImageFormat::Png)
+            .with_context(|| format!("failed to write frame {i}"))?;
+
+        concat_manifest.push_str(&format!("file '{filename}'\n"));
+        concat_manifest.push_str(&format!("duration {:.3}\n", (delay_ms as f64) / 1000.0));
+
+        // ffmpeg's concat demuxer ignores the duration on the final entry, so
+        // the last frame must be listed once more without a duration line.
+        if i == last_index {
+            concat_manifest.push_str(&format!("file '{filename}'\n"));
+        }
+    }
+
+    let concat_path = workdir.path().join("concat.txt");
+    std::fs::write(&concat_path, concat_manifest).context("failed to write concat manifest")?;
+
     let output_path = workdir.path().join("output.mp4");
 
-    std::fs::write(&input_path, data).context("failed to write input sticker")?;
-    convert_webp_to_mp4(&input_path, &output_path)?;
+    log::info!("animated_webp_to_mp4: encoding via concat demuxer -> {}", output_path.display());
+
+    let child = FfmpegCommand::new()
+        .hide_banner()
+        .overwrite()
+        .args(["-f", "concat", "-safe", "0"])
+        .input(concat_path.to_string_lossy().to_string())
+        .filter("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p")
+        .codec_video("libx264")
+        .args(["-preset", "fast", "-crf", "23", "-movflags", "+faststart"])
+        .output(output_path.to_string_lossy().to_string())
+        .spawn()
+        .context("failed to start ffmpeg")?;
+
+    run_ffmpeg_command(child)?;
+    log::info!("animated_webp_to_mp4: success");
 
     std::fs::read(&output_path).context("failed to read generated video")
 }
