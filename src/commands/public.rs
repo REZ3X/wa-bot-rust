@@ -35,7 +35,7 @@ pub async fn handle_h(ctx: &MessageContext) {
                      i - Convert sticker to image/video (reply to sticker)\n\
                      r - Resend view-once media (reply to view-once message)\n\
                      ~d - Download YouTube video ('d <url>' or reply with 'd' to a message containing a YouTube URL)~\n\
-                     [d - Current; disabled due to yt-dlp cookies setup not yet implemented]\n\
+                     [d - Current; issues occured due to yt-dlp cookies setup not yet implemented]\n\
                      ";
     let _ = ctx.send_message(wa::Message {
         conversation: Some(help_text.to_string()),
