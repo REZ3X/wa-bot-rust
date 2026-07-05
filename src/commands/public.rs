@@ -110,37 +110,16 @@ fn gif_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(webp.to_vec())
 }
 
-fn convert_video_to_webp(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
+fn ensure_ffmpeg_available() -> anyhow::Result<()> {
     if !ffmpeg_sidecar::command::ffmpeg_is_installed() {
         log::warn!("ffmpeg not installed, attempting auto_download()");
         auto_download().context("failed to download ffmpeg")?;
         log::info!("ffmpeg auto_download() succeeded");
     }
+    Ok(())
+}
 
-    let filtergraph = format!(
-        "fps={fps},scale={size}:{size}:force_original_aspect_ratio=decrease,pad={size}:{size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
-        fps = ANIMATED_STICKER_FPS,
-        size = STICKER_SIZE
-    );
-    let input = input_path.to_string_lossy().to_string();
-    let output = output_path.to_string_lossy().to_string();
-
-    log::info!("convert_video_to_webp: input={input} output={output}");
-
-    let mut child = FfmpegCommand::new()
-        .hide_banner()
-        .overwrite()
-        .input(input)
-        .filter(filtergraph)
-        .no_audio()
-        .pix_fmt("yuva420p")
-        .codec_video("libwebp")
-        .args(["-lossless", "0", "-q:v", "80", "-preset", "picture", "-loop", "0"])
-        .output(output)
-        .spawn()
-        .context("failed to start ffmpeg")?;
-
-    // Drain ffmpeg's event stream and log it so stalls/errors are visible.
+fn run_ffmpeg_command(mut child: ffmpeg_sidecar::child::FfmpegChild) -> anyhow::Result<()> {
     for event in child.iter().context("failed to read ffmpeg output")? {
         match event {
             ffmpeg_sidecar::event::FfmpegEvent::Log(level, msg) => {
@@ -157,8 +136,64 @@ fn convert_video_to_webp(input_path: &Path, output_path: &Path) -> anyhow::Resul
     if !status.success() {
         anyhow::bail!("ffmpeg exited with status: {status}");
     }
+    Ok(())
+}
 
+fn convert_video_to_webp(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
+    ensure_ffmpeg_available()?;
+
+    let filtergraph = format!(
+        "fps={fps},scale={size}:{size}:force_original_aspect_ratio=decrease,pad={size}:{size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+        fps = ANIMATED_STICKER_FPS,
+        size = STICKER_SIZE
+    );
+    let input = input_path.to_string_lossy().to_string();
+    let output = output_path.to_string_lossy().to_string();
+
+    log::info!("convert_video_to_webp: input={input} output={output}");
+
+    let child = FfmpegCommand::new()
+        .hide_banner()
+        .overwrite()
+        .input(input)
+        .filter(filtergraph)
+        .no_audio()
+        .pix_fmt("yuva420p")
+        .codec_video("libwebp")
+        .args(["-lossless", "0", "-q:v", "80", "-preset", "picture", "-loop", "0"])
+        .output(output)
+        .spawn()
+        .context("failed to start ffmpeg")?;
+
+    run_ffmpeg_command(child)?;
     log::info!("convert_video_to_webp: success");
+    Ok(())
+}
+
+/// Converts an animated WebP (moving sticker) into an MP4 video.
+/// Even-dimension scaling is required since libx264 rejects odd width/height.
+fn convert_webp_to_mp4(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
+    ensure_ffmpeg_available()?;
+
+    let input = input_path.to_string_lossy().to_string();
+    let output = output_path.to_string_lossy().to_string();
+
+    log::info!("convert_webp_to_mp4: input={input} output={output}");
+
+    let child = FfmpegCommand::new()
+        .hide_banner()
+        .overwrite()
+        .input(input)
+        .filter("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        .codec_video("libx264")
+        .pix_fmt("yuv420p")
+        .args(["-preset", "fast", "-crf", "23", "-movflags", "+faststart"])
+        .output(output)
+        .spawn()
+        .context("failed to start ffmpeg")?;
+
+    run_ffmpeg_command(child)?;
+    log::info!("convert_webp_to_mp4: success");
     Ok(())
 }
 
@@ -171,6 +206,18 @@ fn animated_video_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     convert_video_to_webp(&input_path, &output_path)?;
 
     std::fs::read(&output_path).context("failed to read generated sticker")
+}
+
+/// Converts animated WebP sticker bytes into MP4 video bytes.
+fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let workdir = tempdir().context("failed to create temporary directory")?;
+    let input_path = workdir.path().join("input.webp");
+    let output_path = workdir.path().join("output.mp4");
+
+    std::fs::write(&input_path, data).context("failed to write input sticker")?;
+    convert_webp_to_mp4(&input_path, &output_path)?;
+
+    std::fs::read(&output_path).context("failed to read generated video")
 }
 
 fn convert_image_media_to_webp(data: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
@@ -207,10 +254,10 @@ pub fn webp_to_image(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
-/// Runs a blocking conversion closure on a dedicated thread pool with a timeout,
+/// Runs a blocking closure on a dedicated thread pool with a timeout,
 /// so slow/hanging ffmpeg or image work never stalls the async runtime.
-async fn run_blocking_conversion<F>(f: F) -> anyhow::Result<(Vec<u8>, bool)>
-    where F: FnOnce() -> anyhow::Result<(Vec<u8>, bool)> + Send + 'static
+async fn run_blocking<F, T>(f: F) -> anyhow::Result<T>
+    where F: FnOnce() -> anyhow::Result<T> + Send + 'static, T: Send + 'static
 {
     let join_result = tokio::time::timeout(
         Duration::from_secs(FFMPEG_TIMEOUT_SECS),
@@ -252,7 +299,7 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(img).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded image ({} bytes)", data.len());
-                    run_blocking_conversion(move || convert_image_media_to_webp(&data)).await
+                    run_blocking(move || convert_image_media_to_webp(&data)).await
                 }
                 Err(error) => {
                     log::error!("handle_s: image download failed: {error:?}");
@@ -263,7 +310,7 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(vid).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded video ({} bytes)", data.len());
-                    run_blocking_conversion(move || convert_video_media_to_webp(&data)).await
+                    run_blocking(move || convert_video_media_to_webp(&data)).await
                 }
                 Err(error) => {
                     log::error!("handle_s: video download failed: {error:?}");
@@ -341,79 +388,125 @@ pub async fn handle_i(ctx: &MessageContext) {
         }
     }
 
-    if let Some(msg) = target_msg {
-        if let Some(sticker) = msg.sticker_message.as_option() {
-            let downloaded: Result<Vec<u8>, _> = ctx.client.download(sticker).await;
-            match downloaded {
-                Ok(data) => {
-                    match webp_to_image(&data) {
-                        Ok(img_data) => {
-                            match
-                                ctx.client.upload(
-                                    img_data,
-                                    MediaType::Image,
-                                    UploadOptions::default()
-                                ).await
-                            {
-                                Ok(upload) => {
-                                    let reply = wa::Message {
-                                        image_message: buffa::MessageField::some(
-                                            wa::message::ImageMessage {
-                                                url: Some(upload.url),
-                                                direct_path: Some(upload.direct_path),
-                                                media_key: Some(upload.media_key.to_vec()),
-                                                file_sha256: Some(upload.file_sha256.to_vec()),
-                                                file_enc_sha256: Some(
-                                                    upload.file_enc_sha256.to_vec()
-                                                ),
-                                                file_length: Some(upload.file_length),
-                                                media_key_timestamp: Some(
-                                                    upload.media_key_timestamp
-                                                ),
-                                                mimetype: Some("image/jpeg".to_string()),
-                                                ..Default::default()
-                                            }
-                                        ),
-                                        ..Default::default()
-                                    };
-                                    let _ = ctx.send_message(reply).await;
-                                }
-                                Err(error) => {
-                                    log::error!("handle_i: image upload failed: {error:?}");
-                                    let _ = ctx.send_message(wa::Message {
-                                        conversation: Some("Failed to upload image.".to_string()),
-                                        ..Default::default()
-                                    }).await;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            log::error!("handle_i: sticker->image conversion failed: {error:?}");
-                            let _ = ctx.send_message(wa::Message {
-                                conversation: Some(
-                                    "Failed to convert sticker to image.".to_string()
-                                ),
-                                ..Default::default()
-                            }).await;
-                        }
-                    }
-                }
-                Err(error) => {
-                    log::error!("handle_i: sticker download failed: {error:?}");
-                    let _ = ctx.send_message(wa::Message {
-                        conversation: Some("Failed to download sticker.".to_string()),
-                        ..Default::default()
-                    }).await;
-                }
-            }
-        }
-    } else {
+    let Some(msg) = target_msg else {
         let _ = ctx.send_message(wa::Message {
             conversation: Some(
                 "Please reply to a sticker with 'i' to convert it to an image.".to_string()
             ),
             ..Default::default()
         }).await;
+        return;
+    };
+
+    let Some(sticker) = msg.sticker_message.as_option() else {
+        return;
+    };
+
+    let data = match ctx.client.download(sticker).await {
+        Ok(data) => {
+            log::info!("handle_i: downloaded sticker ({} bytes)", data.len());
+            data
+        }
+        Err(error) => {
+            log::error!("handle_i: sticker download failed: {error:?}");
+            let _ = ctx.send_message(wa::Message {
+                conversation: Some("Failed to download sticker.".to_string()),
+                ..Default::default()
+            }).await;
+            return;
+        }
+    };
+
+    // Detect animation from the actual bitstream rather than trusting the
+    // sender-provided is_animated flag, which isn't always set reliably.
+    let is_animated = webp::BitstreamFeatures::new(&data)
+        .map(|features| features.has_animation())
+        .unwrap_or(false);
+
+    if is_animated {
+        log::info!("handle_i: detected animated sticker, converting to mp4");
+
+        let video_result = run_blocking(move || animated_webp_to_mp4(&data)).await;
+
+        match video_result {
+            Ok(mp4_data) => {
+                match ctx.client.upload(mp4_data, MediaType::Video, UploadOptions::default()).await {
+                    Ok(upload) => {
+                        let reply = wa::Message {
+                            video_message: buffa::MessageField::some(wa::message::VideoMessage {
+                                url: Some(upload.url),
+                                direct_path: Some(upload.direct_path),
+                                media_key: Some(upload.media_key.to_vec()),
+                                file_sha256: Some(upload.file_sha256.to_vec()),
+                                file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                                file_length: Some(upload.file_length),
+                                media_key_timestamp: Some(upload.media_key_timestamp),
+                                mimetype: Some("video/mp4".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        };
+                        let _ = ctx.send_message(reply).await;
+                    }
+                    Err(error) => {
+                        log::error!("handle_i: video upload failed: {error:?}");
+                        let _ = ctx.send_message(wa::Message {
+                            conversation: Some("Failed to upload video.".to_string()),
+                            ..Default::default()
+                        }).await;
+                    }
+                }
+            }
+            Err(error) => {
+                log::error!("handle_i: sticker->mp4 conversion failed: {error:?}");
+                let _ = ctx.send_message(wa::Message {
+                    conversation: Some(
+                        "Failed to convert animated sticker to video.".to_string()
+                    ),
+                    ..Default::default()
+                }).await;
+            }
+        }
+        return;
+    }
+
+    // Static sticker path (unchanged behavior)
+    match webp_to_image(&data) {
+        Ok(img_data) => {
+            match ctx.client.upload(img_data, MediaType::Image, UploadOptions::default()).await {
+                Ok(upload) => {
+                    let reply = wa::Message {
+                        image_message: buffa::MessageField::some(wa::message::ImageMessage {
+                            url: Some(upload.url),
+                            direct_path: Some(upload.direct_path),
+                            media_key: Some(upload.media_key.to_vec()),
+                            file_sha256: Some(upload.file_sha256.to_vec()),
+                            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                            file_length: Some(upload.file_length),
+                            media_key_timestamp: Some(upload.media_key_timestamp),
+                            mimetype: Some("image/jpeg".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    let _ = ctx.send_message(reply).await;
+                }
+                Err(error) => {
+                    log::error!("handle_i: image upload failed: {error:?}");
+                    let _ = ctx.send_message(wa::Message {
+                        conversation: Some("Failed to upload image.".to_string()),
+                        ..Default::default()
+                    }).await;
+                }
+            }
+        }
+        Err(error) => {
+            log::error!("handle_i: sticker->image conversion failed: {error:?}");
+            let _ = ctx.send_message(wa::Message {
+                conversation: Some("Failed to convert sticker to image.".to_string()),
+                ..Default::default()
+            }).await;
+        }
     }
 }
 
@@ -437,7 +530,7 @@ pub async fn handle_r(ctx: &MessageContext) {
             if let Some(img) = base.image_message.as_option() {
                 let mut new_img = img.clone();
                 new_img.view_once = Some(false);
-                new_img.caption = None; // optionally strip original caption, or keep it.
+                new_img.caption = None;
                 let reply = wa::Message {
                     image_message: buffa::MessageField::some(new_img),
                     ..Default::default()
