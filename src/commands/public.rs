@@ -2,6 +2,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use ffmpeg_sidecar::{ command::FfmpegCommand, download::auto_download };
@@ -668,7 +669,38 @@ fn find_youtube_url(text: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-pub async fn handle_d(ctx: &MessageContext) {
+/// Downloads a YouTube video by shelling out to the yt-dlp binary directly.
+async fn download_youtube_video(ytdlp_path: PathBuf, url: String) -> anyhow::Result<Vec<u8>> {
+    let workdir = tempdir().context("failed to create temporary directory")?;
+    let output_path = workdir.path().join("video.mp4");
+
+    log::info!("download_youtube_video: fetching {url}");
+
+    let output = tokio::process::Command::new(&ytdlp_path)
+        .args([
+            "-f",
+            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/best",
+            "--merge-output-format",
+            "mp4",
+            "--no-playlist",
+            "--no-warnings",
+            "-o",
+        ])
+        .arg(&output_path)
+        .arg(&url)
+        .output()
+        .await
+        .context("failed to spawn yt-dlp")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("yt-dlp exited with {}: {}", output.status, stderr.trim());
+    }
+
+    tokio::fs::read(&output_path).await.context("failed to read downloaded video")
+}
+
+pub async fn handle_d(ctx: &MessageContext, ytdlp_path: &Path) {
     let text = ctx.message
         .text_content()
         .or_else(|| ctx.message.get_caption())
@@ -719,29 +751,15 @@ pub async fn handle_d(ctx: &MessageContext) {
         ..Default::default()
     }).await;
 
+    let ytdlp_path_owned = ytdlp_path.to_path_buf();
     let download_result = tokio::time::timeout(
         Duration::from_secs(180),
-        async move {
-            let workdir = tempfile::tempdir()
-                .map_err(|e| anyhow::anyhow!("Failed to create temp dir: {e}"))?;
-            let parsed_url = rustube::url::Url::parse(&url)
-                .map_err(|e| anyhow::anyhow!("Invalid YouTube URL: {e}"))?;
-            let video = rustube::Video::from_url(&parsed_url).await
-                .map_err(|e| anyhow::anyhow!("Failed to get video info: {e}"))?;
-            let stream = video.streams().iter()
-                .find(|s| s.includes_video_track && s.includes_audio_track)
-                .or_else(|| video.best_quality())
-                .ok_or_else(|| anyhow::anyhow!("No suitable video stream found"))?;
-            let path = stream.download_to_dir(workdir.path()).await
-                .map_err(|e| anyhow::anyhow!("Failed to download video: {e}"))?;
-            let data = std::fs::read(&path)
-                .map_err(|e| anyhow::anyhow!("Failed to read downloaded file: {e}"))?;
-            anyhow::Ok(data)
-        }
+        download_youtube_video(ytdlp_path_owned, url.clone())
     ).await;
 
     match download_result {
         Ok(Ok(video_data)) => {
+            log::info!("handle_d: downloaded {} bytes, uploading", video_data.len());
             match ctx.client.upload(video_data, MediaType::Video, UploadOptions::default()).await {
                 Ok(upload) => {
                     let reply = wa::Message {
@@ -779,7 +797,7 @@ pub async fn handle_d(ctx: &MessageContext) {
         Err(_) => {
             let _ = ctx.send_message(wa::Message {
                 conversation: Some(
-                    "Download timed out. The video may be too large or the URL may be invalid.".to_string()
+                    "Download timed out. The video may be too large or restricted.".to_string()
                 ),
                 ..Default::default()
             }).await;

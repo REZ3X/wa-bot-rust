@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "time", "io-util"] }
 dotenvy = "0.15"
 log = "0.4"
 env_logger = "0.11"
@@ -17,4 +17,4 @@ qr2term = "0.3"
 tempfile = "3"
 ffmpeg-sidecar = { version = "2.5.2", features = ["download_ffmpeg"] }
 rayon = "1"
-rustube = "0.6"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
