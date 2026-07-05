@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use ffmpeg_sidecar::{ command::FfmpegCommand, download::auto_download };
 use image::{ AnimationDecoder, GenericImageView, ImageDecoder, ImageFormat, Rgba, RgbaImage };
+use rayon::prelude::*;
 use tempfile::tempdir;
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::upload::UploadOptions;
@@ -14,7 +15,8 @@ use whatsapp_rust::wacore::download::MediaType;
 const STICKER_SIZE: u32 = 512;
 const ANIMATED_STICKER_FPS: f32 = 15.0;
 const FFMPEG_TIMEOUT_SECS: u64 = 60;
-const STICKER_TO_VIDEO_TIMEOUT_SECS: u64 = 180; // animated stickers can have many frames
+const STICKER_TO_VIDEO_TIMEOUT_SECS: u64 = 240; // animated stickers can have many frames
+const MAX_STICKER_FRAMES: usize = 300; // ~10-12s of animation at typical sticker framerates
 
 pub async fn handle_g(ctx: &MessageContext) {
     let chat = &ctx.info.source.chat;
@@ -179,46 +181,10 @@ fn convert_video_to_webp(input_path: &Path, output_path: &Path) -> anyhow::Resul
     Ok(())
 }
 
-/// Converts an animated WebP (moving sticker) into an MP4 video.
-/// Even-dimension scaling is required since libx264 rejects odd width/height.
-fn convert_webp_to_mp4(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
-    ensure_ffmpeg_available()?;
-
-    let input = input_path.to_string_lossy().to_string();
-    let output = output_path.to_string_lossy().to_string();
-
-    log::info!("convert_webp_to_mp4: input={input} output={output}");
-
-    let child = FfmpegCommand::new()
-        .hide_banner()
-        .overwrite()
-        .input(input)
-        .filter("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-        .codec_video("libx264")
-        .pix_fmt("yuv420p")
-        .args(["-preset", "veryfast", "-crf", "23", "-movflags", "+faststart"])
-        .output(output)
-        .spawn()
-        .context("failed to start ffmpeg")?;
-
-    run_ffmpeg_command(child)?;
-    log::info!("convert_webp_to_mp4: success");
-    Ok(())
-}
-
-fn animated_video_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let workdir = tempdir().context("failed to create temporary directory")?;
-    let input_path = workdir.path().join("input.bin");
-    let output_path = workdir.path().join("output.webp");
-
-    std::fs::write(&input_path, data).context("failed to write input media")?;
-    convert_video_to_webp(&input_path, &output_path)?;
-
-    std::fs::read(&output_path).context("failed to read generated sticker")
-}
-
 /// Decodes an animated WebP sticker into individual frames (mirrors gif_to_webp's
 /// approach), since ffmpeg's own WebP decoder cannot read animated WebP (ANMF chunks).
+/// Frame compositing + PNG encoding is parallelized across threads via rayon, since
+/// the decode step (collect_frames) is the only inherently sequential/slow part.
 fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     ensure_ffmpeg_available()?;
 
@@ -237,33 +203,55 @@ fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     log::info!("animated_webp_to_mp4: decoded {} frames ({width}x{height})", frames.len());
 
-    let workdir = tempdir().context("failed to create temporary directory")?;
+    if frames.len() > MAX_STICKER_FRAMES {
+        anyhow::bail!(
+            "animated sticker has too many frames ({} > {}), refusing to convert",
+            frames.len(),
+            MAX_STICKER_FRAMES
+        );
+    }
 
-    let mut concat_manifest = String::new();
+    let workdir = tempdir().context("failed to create temporary directory")?;
+    let workdir_path = workdir.path().to_path_buf();
+
+    // Precompute per-frame metadata sequentially (cheap, preserves ordering),
+    // then do the expensive composite+PNG-encode work in parallel across cores.
+    let frame_meta: Vec<(usize, String, u64, i32, i32)> = frames
+        .iter()
+        .enumerate()
+        .map(|(i, frame)| {
+            let delay_ms = Duration::from(frame.delay()).as_millis().clamp(10, 60_000) as u64;
+            (i, format!("frame_{i:05}.png"), delay_ms, frame.left() as i32, frame.top() as i32)
+        })
+        .collect();
+
     let last_index = frames.len() - 1;
 
-    for (i, frame) in frames.iter().enumerate() {
-        let left = frame.left();
-        let top = frame.top();
-        let delay_ms = Duration::from(frame.delay()).as_millis().clamp(10, 60_000) as u64;
+    frame_meta
+        .par_iter()
+        .zip(frames.par_iter())
+        .try_for_each(|((i, filename, _delay, left, top), frame)| -> anyhow::Result<()> {
+            // Composite onto a full-size canvas in case this frame only covers a
+            // sub-region (partial-frame updates), same as the GIF path does.
+            let mut full_frame = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+            image::imageops::overlay(&mut full_frame, frame.buffer(), *left as i64, *top as i64);
 
-        // Composite onto a full-size canvas in case this frame only covers a
-        // sub-region (partial-frame updates), same as the GIF path does.
-        let mut full_frame = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
-        image::imageops::overlay(&mut full_frame, frame.buffer(), left as i64, top as i64);
+            let path = workdir_path.join(filename);
+            full_frame
+                .save_with_format(&path, image::ImageFormat::Png)
+                .with_context(|| format!("failed to write frame {i}"))?;
+            Ok(())
+        })?;
 
-        let filename = format!("frame_{i:05}.png");
-        let path = workdir.path().join(&filename);
-        full_frame
-            .save_with_format(&path, image::ImageFormat::Png)
-            .with_context(|| format!("failed to write frame {i}"))?;
-
+    // Build the concat manifest sequentially afterward, since ordering matters here.
+    let mut concat_manifest = String::new();
+    for (i, filename, delay_ms, _left, _top) in &frame_meta {
         concat_manifest.push_str(&format!("file '{filename}'\n"));
-        concat_manifest.push_str(&format!("duration {:.3}\n", (delay_ms as f64) / 1000.0));
+        concat_manifest.push_str(&format!("duration {:.3}\n", (*delay_ms as f64) / 1000.0));
 
         // ffmpeg's concat demuxer ignores the duration on the final entry, so
         // the last frame must be listed once more without a duration line.
-        if i == last_index {
+        if *i == last_index {
             concat_manifest.push_str(&format!("file '{filename}'\n"));
         }
     }
@@ -291,6 +279,17 @@ fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     log::info!("animated_webp_to_mp4: success");
 
     std::fs::read(&output_path).context("failed to read generated video")
+}
+
+fn animated_video_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let workdir = tempdir().context("failed to create temporary directory")?;
+    let input_path = workdir.path().join("input.bin");
+    let output_path = workdir.path().join("output.webp");
+
+    std::fs::write(&input_path, data).context("failed to write input media")?;
+    convert_video_to_webp(&input_path, &output_path)?;
+
+    std::fs::read(&output_path).context("failed to read generated sticker")
 }
 
 fn convert_image_media_to_webp(data: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
@@ -372,7 +371,7 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(img).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded image ({} bytes)", data.len());
-                    run_blocking(move || convert_image_media_to_webp(&data), STICKER_TO_VIDEO_TIMEOUT_SECS).await
+                    run_blocking(move || convert_image_media_to_webp(&data), FFMPEG_TIMEOUT_SECS).await
                 }
                 Err(error) => {
                     log::error!("handle_s: image download failed: {error:?}");
@@ -532,10 +531,16 @@ pub async fn handle_i(ctx: &MessageContext) {
             }
             Err(error) => {
                 log::error!("handle_i: sticker->mp4 conversion failed: {error:?}");
+                let error_text = error.to_string();
+                let msg = if error_text.contains("too many frames") {
+                    "This animated sticker is too long to convert to video. Try a shorter one."
+                } else if error_text.contains("timed out") {
+                    "Converting this sticker to video took too long. Try a shorter or simpler animated sticker."
+                } else {
+                    "Failed to convert animated sticker to video."
+                };
                 let _ = ctx.send_message(wa::Message {
-                    conversation: Some(
-                        "Failed to convert animated sticker to video.".to_string()
-                    ),
+                    conversation: Some(msg.to_string()),
                     ..Default::default()
                 }).await;
             }
