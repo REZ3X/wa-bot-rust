@@ -14,8 +14,7 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>) {
         return;
     }
 
-    let text_content = ctx
-        .message
+    let text_content = ctx.message
         .text_content()
         .or_else(|| ctx.message.get_caption())
         .unwrap_or_default()
@@ -29,8 +28,8 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>) {
     let is_group = chat.is_group();
     let is_allowed_group = is_group && config.is_group_allowed(&chat.to_string());
 
-    if text_content == "groupid" {
-        commands::public::handle_groupid(&ctx).await;
+    if text_content == "g" {
+        commands::public::handle_g(&ctx).await;
         return;
     }
 
@@ -39,16 +38,19 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>) {
     }
 
     if text_content == "s" {
+        log::info!("dispatch: 's' command from {sender}");
         commands::public::handle_s(&ctx).await;
         return;
     }
 
     if text_content == "i" {
+        log::info!("dispatch: 'i' command from {sender}");
         commands::public::handle_i(&ctx).await;
         return;
     }
 
     if text_content == "r" {
+        log::info!("dispatch: 'r' command from {sender}");
         commands::public::handle_r(&ctx).await;
         return;
     }

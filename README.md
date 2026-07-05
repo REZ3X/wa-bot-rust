@@ -9,7 +9,7 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
 - **Sticker Maker (`s`)**: Converts replied images or GIFs into static WebP stickers (512x512) natively in pure Rust.
 - **Image Converter (`i`)**: Converts WebP stickers back into standard JPEG images.
 - **View-Once Resender (`r`)**: Unwraps and resends view-once media as standard media directly to the chat.
-- **Group ID Fetcher (`groupid`)**: A utility command to fetch the current group JID for configuration purposes.
+- **Group ID Fetcher (`g`)**: A utility command to fetch the current group JID for configuration purposes.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
    ```bash
    cp .env.example .env
    ```
-   *Edit `.env` to add your allowed groups:*
+   _Edit `.env` to add your allowed groups:_
    ```env
    ALLOWED_GROUPS=123456789@g.us,987654321@g.us
    ADMIN_NUMBERS=1234567890@s.whatsapp.net
@@ -33,14 +33,14 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
    ```bash
    cargo run
    ```
-4. **Scan the QR Code**: On the first run, the terminal will display a QR code block. Open WhatsApp on your phone -> Linked Devices -> Link a Device, and scan the code. 
-   *(Subsequent runs will automatically connect using the persisted SQLite session).*
+4. **Scan the QR Code**: On the first run, the terminal will display a QR code block. Open WhatsApp on your phone -> Linked Devices -> Link a Device, and scan the code.
+   _(Subsequent runs will automatically connect using the persisted SQLite session)._
 
 ## Commands
 
 All commands are invoked by sending the exact string or replying to media with the string.
 
-- `groupid` - Prints the internal Group ID (JID) of the current chat. Use this to easily find the ID to whitelist in `.env`.
+- `g` - Prints the internal Group ID (JID) of the current chat. Use this to easily find the ID to whitelist in `.env`.
 - `s` - Reply to an Image or GIF with `s` to generate a WhatsApp sticker.
 - `i` - Reply to a Sticker with `i` to convert it back to a JPEG image.
 - `r` - Reply to a "view-once" image or video to unpack and resend it as normal media.
@@ -50,13 +50,15 @@ All commands are invoked by sending the exact string or replying to media with t
 ## ⚠️ Known Issues & Workarounds
 
 ### Admin Privilege / Phone Number Identifier
-There is currently a slight issue with reliably matching the phone number identifiers for the Admin privilege check. Because of this, **the `r` (view-once resend) command has been temporarily moved to a public act**. 
+
+There is currently a slight issue with reliably matching the phone number identifiers for the Admin privilege check. Because of this, **the `r` (view-once resend) command has been temporarily moved to a public act**.
 
 Any user in an authorized group can currently use the `r` command until the admin identifier matching logic is patched and re-enabled in `src/handlers.rs`.
 
 ## ⚖️ Ethical & Privacy Disclaimer
 
 ### View-Once Media Automation
+
 This bot includes a feature (`r`) to unpack and resend "view-once" media. While circumventing the sender's intended privacy controls raises ethical considerations, it is important to understand the technical realities of the platform:
 
 - **Intended Audience**: If a message was sent to you (or your authorized group), the platform has already delivered that data to you. You are going to see it anyway.

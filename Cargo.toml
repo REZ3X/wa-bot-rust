@@ -14,3 +14,5 @@ webp = "0.3"
 anyhow = "1.0"
 buffa = "0.8.1"
 qr2term = "0.3"
+tempfile = "3"
+ffmpeg-sidecar = { version = "2.5.2", features = ["download_ffmpeg"] }
