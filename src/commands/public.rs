@@ -14,6 +14,7 @@ use whatsapp_rust::wacore::download::MediaType;
 const STICKER_SIZE: u32 = 512;
 const ANIMATED_STICKER_FPS: f32 = 15.0;
 const FFMPEG_TIMEOUT_SECS: u64 = 60;
+const STICKER_TO_VIDEO_TIMEOUT_SECS: u64 = 180; // animated stickers can have many frames
 
 pub async fn handle_g(ctx: &MessageContext) {
     let chat = &ctx.info.source.chat;
@@ -195,7 +196,7 @@ fn convert_webp_to_mp4(input_path: &Path, output_path: &Path) -> anyhow::Result<
         .filter("scale=trunc(iw/2)*2:trunc(ih/2)*2")
         .codec_video("libx264")
         .pix_fmt("yuv420p")
-        .args(["-preset", "fast", "-crf", "23", "-movflags", "+faststart"])
+        .args(["-preset", "veryfast", "-crf", "23", "-movflags", "+faststart"])
         .output(output)
         .spawn()
         .context("failed to start ffmpeg")?;
@@ -281,7 +282,7 @@ fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         .input(concat_path.to_string_lossy().to_string())
         .filter("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p")
         .codec_video("libx264")
-        .args(["-preset", "fast", "-crf", "23", "-movflags", "+faststart"])
+        .args(["-preset", "veryfast", "-crf", "23", "-movflags", "+faststart"])
         .output(output_path.to_string_lossy().to_string())
         .spawn()
         .context("failed to start ffmpeg")?;
@@ -328,18 +329,18 @@ pub fn webp_to_image(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 /// Runs a blocking closure on a dedicated thread pool with a timeout,
 /// so slow/hanging ffmpeg or image work never stalls the async runtime.
-async fn run_blocking<F, T>(f: F) -> anyhow::Result<T>
+async fn run_blocking<F, T>(f: F, timeout_secs: u64) -> anyhow::Result<T>
     where F: FnOnce() -> anyhow::Result<T> + Send + 'static, T: Send + 'static
 {
     let join_result = tokio::time::timeout(
-        Duration::from_secs(FFMPEG_TIMEOUT_SECS),
+        Duration::from_secs(timeout_secs),
         tokio::task::spawn_blocking(f)
     ).await;
 
     match join_result {
         Ok(Ok(inner)) => inner,
         Ok(Err(join_err)) => Err(anyhow::anyhow!("conversion task panicked: {join_err}")),
-        Err(_) => Err(anyhow::anyhow!("conversion timed out after {FFMPEG_TIMEOUT_SECS}s")),
+        Err(_) => Err(anyhow::anyhow!("conversion timed out after {timeout_secs}s")),
     }
 }
 
@@ -371,7 +372,7 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(img).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded image ({} bytes)", data.len());
-                    run_blocking(move || convert_image_media_to_webp(&data)).await
+                    run_blocking(move || convert_image_media_to_webp(&data), STICKER_TO_VIDEO_TIMEOUT_SECS).await
                 }
                 Err(error) => {
                     log::error!("handle_s: image download failed: {error:?}");
@@ -382,7 +383,7 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(vid).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded video ({} bytes)", data.len());
-                    run_blocking(move || convert_video_media_to_webp(&data)).await
+                    run_blocking(move || convert_video_media_to_webp(&data), STICKER_TO_VIDEO_TIMEOUT_SECS).await
                 }
                 Err(error) => {
                     log::error!("handle_s: video download failed: {error:?}");
@@ -498,7 +499,7 @@ pub async fn handle_i(ctx: &MessageContext) {
     if is_animated {
         log::info!("handle_i: detected animated sticker, converting to mp4");
 
-        let video_result = run_blocking(move || animated_webp_to_mp4(&data)).await;
+        let video_result = run_blocking(move || animated_webp_to_mp4(&data), STICKER_TO_VIDEO_TIMEOUT_SECS).await;
 
         match video_result {
             Ok(mp4_data) => {
