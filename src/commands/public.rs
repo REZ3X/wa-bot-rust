@@ -120,13 +120,15 @@ fn ensure_ffmpeg_available() -> anyhow::Result<()> {
 }
 
 fn run_ffmpeg_command(mut child: ffmpeg_sidecar::child::FfmpegChild) -> anyhow::Result<()> {
+    let mut log_lines: Vec<String> = Vec::new();
+
     for event in child.iter().context("failed to read ffmpeg output")? {
         match event {
             ffmpeg_sidecar::event::FfmpegEvent::Log(level, msg) => {
-                log::debug!("ffmpeg[{level:?}]: {msg}");
+                log_lines.push(format!("[{level:?}] {msg}"));
             }
             ffmpeg_sidecar::event::FfmpegEvent::Error(err) => {
-                log::error!("ffmpeg error event: {err}");
+                log_lines.push(format!("[Error] {err}"));
             }
             _ => {}
         }
@@ -134,8 +136,14 @@ fn run_ffmpeg_command(mut child: ffmpeg_sidecar::child::FfmpegChild) -> anyhow::
 
     let status = child.wait().context("failed to wait for ffmpeg")?;
     if !status.success() {
+        // Only dump the tail of ffmpeg's own output when something goes wrong.
+        let tail: Vec<&String> = log_lines.iter().rev().take(20).collect();
+        for line in tail.iter().rev() {
+            log::error!("ffmpeg output: {line}");
+        }
         anyhow::bail!("ffmpeg exited with status: {status}");
     }
+
     Ok(())
 }
 
