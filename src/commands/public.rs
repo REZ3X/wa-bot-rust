@@ -44,8 +44,9 @@ pub async fn handle_t(ctx: &MessageContext) {
     let channel = extract_toml_string_value(RUST_TOOLCHAIN_TOML, "channel");
 
     let tech_text = format!(
-        "Techstack Used:\n\
-         {name} v{version}\n\
+        "Project: {name} `v{version}`\n\
+         \n\
+         Techstack Used:\n\
          Rust {edition} Edition\n\
          Cargo\n\
          Toolchain `{channel}` channel\n\
@@ -54,6 +55,10 @@ pub async fn handle_t(ctx: &MessageContext) {
          whatsapp-rust\n\
          Deno\n\
          Tokio\n\
+         SQLite\n\
+         \n\
+         For more information, see the project repository:\n\
+         https://github.com/REZ3X/wa-bot-rust
          "
     );
 
