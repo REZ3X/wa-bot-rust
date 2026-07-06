@@ -33,7 +33,8 @@ pub async fn handle_g(ctx: &MessageContext) {
 }
 
 pub async fn handle_h(ctx: &MessageContext) {
-    let help_text = "Available commands:\n\
+    let help_text =
+        "Available commands:\n\
                      g - Get group JID\n\
                      h - Show this help message\n\
                      s - Convert image/video to sticker (reply to media)\n\
@@ -83,9 +84,9 @@ fn image_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 fn gif_to_webp(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(data)).context(
-        "failed to create gif decoder"
-    )?;
+    let decoder = image::codecs::gif::GifDecoder
+        ::new(Cursor::new(data))
+        .context("failed to create gif decoder")?;
     let (gif_width, gif_height) = decoder.dimensions();
     let frames = decoder.into_frames().collect_frames().context("failed to collect gif frames")?;
 
@@ -210,9 +211,9 @@ fn convert_video_to_webp(input_path: &Path, output_path: &Path) -> anyhow::Resul
 fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     ensure_ffmpeg_available()?;
 
-    let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(data)).context(
-        "failed to create webp decoder"
-    )?;
+    let decoder = image::codecs::webp::WebPDecoder
+        ::new(Cursor::new(data))
+        .context("failed to create webp decoder")?;
     let (width, height) = decoder.dimensions();
     let frames = decoder
         .into_frames()
@@ -252,18 +253,25 @@ fn animated_webp_to_mp4(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     frame_meta
         .par_iter()
         .zip(frames.par_iter())
-        .try_for_each(|((i, filename, _delay, left, top), frame)| -> anyhow::Result<()> {
-            // Composite onto a full-size canvas in case this frame only covers a
-            // sub-region (partial-frame updates), same as the GIF path does.
-            let mut full_frame = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
-            image::imageops::overlay(&mut full_frame, frame.buffer(), *left as i64, *top as i64);
+        .try_for_each(
+            |((i, filename, _delay, left, top), frame)| -> anyhow::Result<()> {
+                // Composite onto a full-size canvas in case this frame only covers a
+                // sub-region (partial-frame updates), same as the GIF path does.
+                let mut full_frame = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+                image::imageops::overlay(
+                    &mut full_frame,
+                    frame.buffer(),
+                    *left as i64,
+                    *top as i64
+                );
 
-            let path = workdir_path.join(filename);
-            full_frame
-                .save_with_format(&path, image::ImageFormat::Png)
-                .with_context(|| format!("failed to write frame {i}"))?;
-            Ok(())
-        })?;
+                let path = workdir_path.join(filename);
+                full_frame
+                    .save_with_format(&path, image::ImageFormat::Png)
+                    .with_context(|| format!("failed to write frame {i}"))?;
+                Ok(())
+            }
+        )?;
 
     // Build the concat manifest sequentially afterward, since ordering matters here.
     let mut concat_manifest = String::new();
@@ -326,7 +334,9 @@ fn convert_image_media_to_webp(data: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
                 .map(|features| features.has_animation())
                 .unwrap_or(false)
         => {
-            log::info!("convert_image_media_to_webp: detected animated WebP, routing through ffmpeg");
+            log::info!(
+                "convert_image_media_to_webp: detected animated WebP, routing through ffmpeg"
+            );
             animated_video_to_webp(data).map(|webp| (webp, true))
         }
         other => {
@@ -393,7 +403,10 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(img).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded image ({} bytes)", data.len());
-                    run_blocking(move || convert_image_media_to_webp(&data), FFMPEG_TIMEOUT_SECS).await
+                    run_blocking(
+                        move || convert_image_media_to_webp(&data),
+                        FFMPEG_TIMEOUT_SECS
+                    ).await
                 }
                 Err(error) => {
                     log::error!("handle_s: image download failed: {error:?}");
@@ -404,7 +417,10 @@ pub async fn handle_s(ctx: &MessageContext) {
             match ctx.client.download(vid).await {
                 Ok(data) => {
                     log::info!("handle_s: downloaded video ({} bytes)", data.len());
-                    run_blocking(move || convert_video_media_to_webp(&data), STICKER_TO_VIDEO_TIMEOUT_SECS).await
+                    run_blocking(
+                        move || convert_video_media_to_webp(&data),
+                        STICKER_TO_VIDEO_TIMEOUT_SECS
+                    ).await
                 }
                 Err(error) => {
                     log::error!("handle_s: video download failed: {error:?}");
@@ -513,14 +529,18 @@ pub async fn handle_i(ctx: &MessageContext) {
 
     // Detect animation from the actual bitstream rather than trusting the
     // sender-provided is_animated flag, which isn't always set reliably.
-    let is_animated = webp::BitstreamFeatures::new(&data)
+    let is_animated = webp::BitstreamFeatures
+        ::new(&data)
         .map(|features| features.has_animation())
         .unwrap_or(false);
 
     if is_animated {
         log::info!("handle_i: detected animated sticker, converting to mp4");
 
-        let video_result = run_blocking(move || animated_webp_to_mp4(&data), STICKER_TO_VIDEO_TIMEOUT_SECS).await;
+        let video_result = run_blocking(
+            move || animated_webp_to_mp4(&data),
+            STICKER_TO_VIDEO_TIMEOUT_SECS
+        ).await;
 
         match video_result {
             Ok(mp4_data) => {
@@ -672,7 +692,7 @@ pub async fn handle_r(ctx: &MessageContext) {
 
 fn find_youtube_url(text: &str) -> Option<String> {
     text.split_whitespace()
-        .find(|word| word.contains("youtube.com/") || word.contains("youtu.be/"))
+        .find(|word| (word.contains("youtube.com/") || word.contains("youtu.be/")))
         .map(|s| s.trim().to_string())
 }
 
@@ -693,6 +713,8 @@ async fn download_youtube_video(ctx: &YtDlpContext, url: String) -> anyhow::Resu
         "mp4",
         "--no-playlist",
         "--no-warnings",
+        "--remote-components",
+        "ejs:github",
     ]);
 
     if let Some(cookies) = &ctx.cookies_path {
