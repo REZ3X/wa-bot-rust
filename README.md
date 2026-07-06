@@ -1,6 +1,6 @@
 # WhatsApp Bot (Rust)
 
-A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It operates autonomously in authorized groups, allowing users to convert images, GIFs, and videos into stickers, convert stickers back into images or videos, and bypass "view-once" media restrictions.
+A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It operates autonomously in authorized groups, allowing users to convert images, GIFs, and videos into stickers, convert stickers back into images or videos, bypass "view-once" media restrictions, and download YouTube videos.
 
 ## Features
 
@@ -11,20 +11,23 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
 - **View-Once Resender (`r`)**: Unwraps and resends view-once media as standard media directly to the chat.
 - **Group ID Fetcher (`g`)**: A utility command to fetch the current group JID for configuration purposes.
 - **Help Menu (`h`)**: Lists all available commands directly in chat.
-- **YouTube Downloader (`d`)**: Downloads a YouTube video by URL (or from a replied message) and sends it back as a video. ⚠️ Currently broken for many videos — see [Known Issues](#known-issues--workarounds).
+- **YouTube Downloader (`d`)**: Downloads a YouTube video by URL (or from a replied message) and sends it back as a video, with a duration cap to avoid excessively long downloads. Requires a cookies file and a JS runtime (Deno) to work reliably — see [yt-dlp dependency](#yt-dlp-dependency) below.
 
 ## Requirements
 
 - Rust (Nightly toolchain: `nightly-2026-04-05` specified in `rust-toolchain.toml`)
 - Cargo
 - **ffmpeg** installed and available on `PATH` (required for animated sticker ↔ video/GIF conversion — see [ffmpeg dependency](#ffmpeg-dependency) below)
-- **yt-dlp** binary (auto-downloaded on first run into `./libs` — required for the `d` command, see [yt-dlp dependency](#yt-dlp-dependency) below)
+- **yt-dlp** binary (auto-downloaded on first run into `./libs` — required for the `d` command)
+- **Deno** installed and available on `PATH` (required for the `d` command to reliably fetch real video/audio formats — see [yt-dlp dependency](#yt-dlp-dependency) below)
+- **A YouTube cookies file** (required for the `d` command on most videos — see [yt-dlp dependency](#yt-dlp-dependency) below)
 
 ## Installation & Setup
 
 1. **Clone the repository** and navigate to the project root.
 2. **Install ffmpeg** (see [ffmpeg dependency](#ffmpeg-dependency) — required on both your dev machine and any deploy target).
-3. **Setup the Environment Variables**:
+3. **Install Deno and set up YouTube cookies** (see [yt-dlp dependency](#yt-dlp-dependency) — required for the `d` command).
+4. **Setup the Environment Variables**:
    Copy `.env.example` to `.env` and configure your settings:
    ```bash
    cp .env.example .env
@@ -34,11 +37,15 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
    ALLOWED_GROUPS=123456789@g.us,987654321@g.us
    ADMIN_NUMBERS=1234567890@s.whatsapp.net
    ```
-4. **Run the Bot**:
+   _Optionally override the default cookies file location:_
+   ```env
+   YTDLP_COOKIES_FILE=creds/youtube_cookies.txt
+   ```
+5. **Run the Bot**:
    ```bash
    cargo run
    ```
-5. **Scan the QR Code**: On the first run, the terminal will display a QR code block. Open WhatsApp on your phone -> Linked Devices -> Link a Device, and scan the code.
+6. **Scan the QR Code**: On the first run, the terminal will display a QR code block. Open WhatsApp on your phone -> Linked Devices -> Link a Device, and scan the code.
    _(Subsequent runs will automatically connect using the persisted SQLite session)._
 
 ## Commands
@@ -58,11 +65,12 @@ All commands are invoked by sending the exact string or replying to media with t
 - `d` - Downloads a YouTube video and sends it back as a video message. Usage:
   - `d <YouTube URL>` — e.g. `d https://youtu.be/dQw4w9WgXcQ`
   - Reply to a message containing a YouTube URL with just `d`.
-  - ⚠️ **Currently broken for many videos** due to YouTube bot-detection — see [Known Issues](#known-issues--workarounds).
+  - Before downloading, the bot checks the video's duration via `yt-dlp` metadata (no media is fetched for this check). Videos longer than **`MAX_VIDEO_DURATION_SECS`** (default: **3600 seconds / 1 hour**, set in `src/commands/public.rs`) are rejected with a message asking for a shorter video, instead of spending time and bandwidth downloading something huge. If duration can't be determined for some reason, the bot logs a warning and attempts the download anyway rather than blocking it outright.
+  - Requires ffmpeg (for merging), Deno (for solving YouTube's JS challenge), and a valid cookies file (for bot-detection bypass) to be set up correctly — see below.
 
 ### ffmpeg dependency
 
-Any conversion involving video or animated stickers (the video branch of `s`, and the animated branch of `i`) shells out to `ffmpeg` via `ffmpeg-sidecar`. This requires ffmpeg with `libx264` and `libwebp` support to be installed **on whichever machine actually runs the bot process** — dev and deploy environments are independent, so if you develop on Windows and deploy on Linux, install it on both:
+Any conversion involving video or animated stickers (the video branch of `s`, the animated branch of `i`, and merging streams for `d`) shells out to `ffmpeg` via `ffmpeg-sidecar` or directly via `yt-dlp`. This requires ffmpeg with `libx264` and `libwebp` support to be installed **on whichever machine actually runs the bot process** — dev and deploy environments are independent, so if you develop on Windows and deploy on Linux, install it on both:
 
 - **Windows**: `winget install ffmpeg` (or download a build from gyan.dev and add it to `PATH`)
 - **Linux (Debian/Ubuntu)**: `sudo apt install ffmpeg`
@@ -75,11 +83,61 @@ Conversions involving ffmpeg run on a blocking thread pool with timeouts (60s fo
 
 ### yt-dlp dependency
 
-The `d` command shells out directly to the standalone [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) binary as a subprocess, rather than using a Rust wrapper crate. On first run, the bot automatically downloads the correct binary for your OS into `./libs` and reuses it on subsequent runs. This requires outbound network access to GitHub the first time the bot starts (same one-time requirement as ffmpeg's auto-download fallback).
+The `d` command shells out directly to the standalone [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) binary as a subprocess, rather than using a Rust wrapper crate. On first run, the bot automatically downloads the correct binary for your OS into `./libs` and reuses it on subsequent runs (self-updating on every startup via `yt-dlp -U`, since YouTube's extraction internals change frequently enough that a stale binary can silently break downloads).
 
-We deliberately avoid the `yt-dlp` Rust crate (`boul2gom/yt-dlp`) here: as of writing, its published `2.7.2` release depends on `lofty ^0.23.2`, and both existing releases in that range have been yanked from crates.io, making the crate impossible to compile fresh (tracked upstream in [boul2gom/yt-dlp#192](https://github.com/boul2gom/yt-dlp/issues/192), still unresolved). Invoking the `yt-dlp` binary directly sidesteps this entirely, and also avoids depending on a large stack of features (caching, webhooks, audio metadata tagging) that this bot doesn't use.
+We deliberately avoid the `yt-dlp` Rust crate (`boul2gom/yt-dlp`): as of writing, its published `2.7.2` release depends on `lofty ^0.23.2`, and both existing releases in that range have been yanked from crates.io, making the crate impossible to compile fresh (tracked upstream in [boul2gom/yt-dlp#192](https://github.com/boul2gom/yt-dlp/issues/192), still unresolved). Invoking the `yt-dlp` binary directly sidesteps this entirely, and also avoids depending on a large stack of features (caching, webhooks, audio metadata tagging) that this bot doesn't use.
 
-Video download/merge uses your system-installed ffmpeg automatically (same one required above), so no separate ffmpeg setup is needed for the `d` command specifically.
+Reliable operation of the `d` command needs **two additional pieces of setup** beyond just having the `yt-dlp` binary:
+
+#### 1. A JavaScript runtime (Deno)
+
+As of late 2025, YouTube requires solving a JavaScript-based anti-throttling puzzle ("n challenge") to obtain real video/audio format URLs. Without a JS runtime, `yt-dlp` falls back to only storyboard/thumbnail formats and downloads will fail with `"Requested format is not available"`. Install [Deno](https://deno.land/) (yt-dlp's recommended/default runtime) on **whichever machine runs the bot**:
+
+```bash
+curl -fsSL https://deno.land/install.sh | sh
+echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+deno --version
+```
+
+**If running as a systemd service**, note that `~/.bashrc` changes only apply to interactive shells — systemd units use their own environment. Add Deno's path explicitly to your unit file:
+
+```ini
+[Service]
+Environment="PATH=/home/youruser/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+```
+
+Then `sudo systemctl daemon-reload && sudo systemctl restart <your-service-name>`.
+
+You can verify this is working correctly on the server with:
+```bash
+./libs/yt-dlp --remote-components ejs:github --cookies creds/youtube_cookies.txt -F "https://youtu.be/dQw4w9WgXcQ"
+```
+This should list real video/audio formats, not just `mhtml` storyboard entries.
+
+#### 2. A YouTube cookies file
+
+Many videos additionally require an authenticated session to bypass YouTube's bot-detection (`"Sign in to confirm you're not a bot"`). This requires exporting cookies from a real, logged-in YouTube session:
+
+1. Read yt-dlp's own guide first: [How do I pass cookies to yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp) and [Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies) for the most current, detailed instructions and recommended browser extensions.
+2. **Use a secondary/throwaway Google account for this**, not your personal one — the exported file is equivalent to a logged-in session for that account, and treating it as disposable means nothing personally sensitive is at stake if it needs rotating.
+3. Export cookies in Netscape format (the extensions linked in yt-dlp's wiki do this automatically) and place the file on the server at `creds/youtube_cookies.txt` (or wherever `YTDLP_COOKIES_FILE` in `.env` points).
+4. **Never commit this file to git.** Make sure your `.gitignore` includes:
+   ```
+   creds/
+   libs/
+   downloads/
+   ```
+5. Copy it to the server out-of-band (e.g. `scp`), not through version control:
+   ```bash
+   scp youtube_cookies.txt user@your-server:/path/to/wa-bot-rust/creds/youtube_cookies.txt
+   ```
+
+On startup, the bot logs whether it found a cookies file at the resolved path. If it's missing, `d` will still attempt downloads but will likely fail on bot-detection-protected videos with the "Sign in to confirm you're not a bot" error.
+
+**Cookies expire.** Several of the exported cookie values (especially `__Secure-1PSIDTS`, `__Secure-3PSIDTS`, `SIDCC`) are short-lived rotating tokens that a real browser refreshes automatically during normal use — a static exported file can go stale within days to weeks even though the longer-lived `SID`/`PSID` values last longer. If `d` starts failing again with a "sign in" error after previously working, re-export a fresh cookies file rather than assuming it's a code regression.
+
+⚠️ **Security note**: a YouTube cookies file is tied to a real Google account session — treat it exactly like a credential. Anyone with the file can access that account's YouTube session (and potentially other Google services under the same session) until it's rotated or the account's password is changed.
 
 ---
 
@@ -91,22 +149,13 @@ There is currently a slight issue with reliably matching the phone number identi
 
 Any user in an authorized group can currently use the `r` command until the admin identifier matching logic is patched and re-enabled in `src/handlers.rs`.
 
-### YouTube Downloader (`d`) — Currently Broken for Many Videos
+### YouTube Downloader (`d`) — Requires Ongoing Maintenance
 
-The `d` command frequently fails with an error like:
+Unlike the other commands, `d` depends on external, frequently-changing factors outside this bot's control:
 
-```
-Failed to download video: yt-dlp exited with exit status: 1: ERROR: [youtube] VIDEO_ID: Sign in to confirm you're
-not a bot. Use --cookies-from-browser or --cookies for the authentication.
-```
-
-**Cause**: YouTube has been rolling out stricter bot-detection that blocks anonymous (cookie-less) requests from `yt-dlp` on certain videos, IPs, and datacenter/VPS network ranges in particular (which is why this may be more likely to show up on a deployed server than on a home connection). This is not a bug in this bot's code — it's YouTube requiring an authenticated session before it will serve the video.
-
-**Fix (not yet implemented)**: `yt-dlp` supports passing YouTube session cookies via `--cookies-from-browser <browser>` (read cookies from a local browser profile) or `--cookies <cookies-file>` (a Netscape-format cookies file, e.g. exported with a browser extension). This isn't yet wired into `download_youtube_video` in `src/commands/public.rs` — it currently calls `yt-dlp` with no cookie authentication at all. Planned fix: export cookies once from a logged-in YouTube session, store the cookies file securely alongside the bot (excluded from git via `.gitignore`), and pass `--cookies <path>` in the `yt-dlp` invocation. Until then, expect the `d` command to fail intermittently or consistently depending on the video and the server's network reputation with YouTube.
-
-See yt-dlp's own documentation for details: [How do I pass cookies to yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp) and [Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
-
-⚠️ **Security note for later**: a YouTube cookies file is tied to a real Google account session. Treat it like a credential — never commit it to version control, and be aware that sharing it grants access to that account's YouTube session.
+- **YouTube's bot-detection and JS-challenge requirements evolve over time.** The current setup (Deno + `--remote-components ejs:github` + a cookies file) reflects YouTube/yt-dlp's requirements as of this writing, but YouTube has changed its extraction requirements multiple times in the past and is expected to continue doing so. If `d` starts failing again, check the [yt-dlp EJS wiki page](https://github.com/yt-dlp/yt-dlp/wiki/EJS) and the [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ) for updated guidance before assuming it's a bug in this bot.
+- **Cookies expire** and need periodic re-export (see [yt-dlp dependency](#yt-dlp-dependency) above).
+- **Some videos may still fail** even with everything set up correctly — livestreams, age-restricted content, region-locked videos, and members-only content have additional restrictions that cookies/Deno alone may not resolve.
 
 ## ⚖️ Ethical & Privacy Disclaimer
 
@@ -118,3 +167,7 @@ This bot includes a feature (`r`) to unpack and resend "view-once" media. While 
 - **No Absolute Security**: "View once" is a casual deterrent for accidental sharing, not a foolproof security mechanism. Any recipient can still photograph the screen or use modified clients. No messaging platform can completely prevent a recipient from capturing information they already have access to.
 
 By using this bot, you acknowledge these technical realities. Please use this tool responsibly and consider the sender's expectations when automating the capture of restricted media.
+
+### YouTube Downloader
+
+The `d` command downloads publicly (or account-) accessible YouTube content for personal use in the chat it's invoked from. Downloading and redistributing copyrighted content may violate YouTube's Terms of Service and applicable copyright law depending on your jurisdiction and how the downloaded media is subsequently used or shared. Use responsibly and at your own discretion.
