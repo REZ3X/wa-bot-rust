@@ -4,11 +4,12 @@ mod handlers;
 
 use anyhow::Context;
 use config::Config;
-use log::{error, info};
+use log::{error, info, warn};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use whatsapp_rust::prelude::*;
+use commands::public::YtDlpContext;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -58,6 +59,28 @@ async fn ensure_ytdlp_binary(libs_dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(bin_path)
 }
 
+/// Resolves the path to a YouTube cookies file used to authenticate yt-dlp
+/// requests when YouTube's bot-detection blocks anonymous access. Falls back
+/// to `creds/youtube_cookies.txt` if the `YTDLP_COOKIES_FILE` env var isn't set.
+/// Returns `None` (with a warning) if no file is found at the resolved path.
+fn resolve_cookies_path() -> Option<PathBuf> {
+    let configured = std::env
+        ::var("YTDLP_COOKIES_FILE")
+        .unwrap_or_else(|_| "creds/youtube_cookies.txt".to_string());
+    let path = PathBuf::from(configured);
+
+    if path.exists() {
+        info!("Using YouTube cookies file at {}", path.display());
+        Some(path)
+    } else {
+        warn!(
+            "No YouTube cookies file found at {} — 'd' command may fail on bot-detection-protected videos",
+            path.display()
+        );
+        None
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -74,8 +97,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // isn't re-downloaded on every restart). System ffmpeg (already required
     // for the sticker pipeline) is used automatically by yt-dlp when merging
     // separate audio/video streams, since it's already on PATH.
-    let ytdlp_path = Arc::new(ensure_ytdlp_binary(Path::new("libs")).await?);
-    info!("yt-dlp ready at {}", ytdlp_path.display());
+    let ytdlp_binary = ensure_ytdlp_binary(Path::new("libs")).await?;
+    info!("yt-dlp ready at {}", ytdlp_binary.display());
+
+    let cookies_path = resolve_cookies_path();
+
+    let ytdlp_ctx = Arc::new(YtDlpContext {
+        binary_path: ytdlp_binary,
+        cookies_path,
+    });
 
     let bot = Bot::builder()
         .with_backend(store)
@@ -95,12 +125,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .on_message({
             let config = config.clone();
-            let ytdlp_path = ytdlp_path.clone();
+            let ytdlp_ctx = ytdlp_ctx.clone();
             move |ctx| {
                 let config = config.clone();
-                let ytdlp_path = ytdlp_path.clone();
+                let ytdlp_ctx = ytdlp_ctx.clone();
                 async move {
-                    handlers::handle_message(ctx, config, ytdlp_path).await;
+                    handlers::handle_message(ctx, config, ytdlp_ctx).await;
                 }
             }
         })

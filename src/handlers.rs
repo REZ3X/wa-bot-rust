@@ -1,4 +1,5 @@
 use crate::commands;
+use crate::commands::public::YtDlpContext;
 use crate::config::Config;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,7 +7,7 @@ use whatsapp_rust::prelude::*;
 use whatsapp_rust::wacore::proto_helpers::MessageExt;
 use whatsapp_rust::wacore_binary::JidExt;
 
-pub async fn handle_message(ctx: MessageContext, config: Arc<Config>, ytdlp_path: Arc<PathBuf>) {
+pub async fn handle_message(ctx: MessageContext, config: Arc<Config>, ytdlp_ctx: Arc<YtDlpContext>) {
     let chat = &ctx.info.source.chat;
     let sender = &ctx.info.source.sender;
     let is_from_me = ctx.info.source.is_from_me;
@@ -64,7 +65,7 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>, ytdlp_path
 
     if text_content == "d" || text_content.starts_with("d ") {
         log::info!("dispatch: 'd' command from {sender}");
-        commands::public::handle_d(&ctx, &ytdlp_path).await;
+        commands::public::handle_d(&ctx, &ytdlp_ctx).await;
         return;
     }
 

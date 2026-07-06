@@ -19,6 +19,11 @@ const FFMPEG_TIMEOUT_SECS: u64 = 60;
 const STICKER_TO_VIDEO_TIMEOUT_SECS: u64 = 240; // animated stickers can have many frames
 const MAX_STICKER_FRAMES: usize = 300; // ~10-12s of animation at typical sticker framerates
 
+pub struct YtDlpContext {
+    pub binary_path: PathBuf,
+    pub cookies_path: Option<PathBuf>,
+}
+
 pub async fn handle_g(ctx: &MessageContext) {
     let chat = &ctx.info.source.chat;
     let _ = ctx.send_message(wa::Message {
@@ -672,27 +677,29 @@ fn find_youtube_url(text: &str) -> Option<String> {
 }
 
 /// Downloads a YouTube video by shelling out to the yt-dlp binary directly.
-async fn download_youtube_video(ytdlp_path: PathBuf, url: String) -> anyhow::Result<Vec<u8>> {
+async fn download_youtube_video(ctx: &YtDlpContext, url: String) -> anyhow::Result<Vec<u8>> {
     let workdir = tempdir().context("failed to create temporary directory")?;
     let output_path = workdir.path().join("video.mp4");
 
     log::info!("download_youtube_video: fetching {url}");
 
-    let output = tokio::process::Command::new(&ytdlp_path)
-        .args([
-            "-f",
-            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/best",
-            "--merge-output-format",
-            "mp4",
-            "--no-playlist",
-            "--no-warnings",
-            "-o",
-        ])
-        .arg(&output_path)
-        .arg(&url)
-        .output()
-        .await
-        .context("failed to spawn yt-dlp")?;
+    let mut cmd = tokio::process::Command::new(&ctx.binary_path);
+    cmd.args([
+        "-f",
+        "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/best",
+        "--merge-output-format",
+        "mp4",
+        "--no-playlist",
+        "--no-warnings",
+    ]);
+
+    if let Some(cookies) = &ctx.cookies_path {
+        cmd.arg("--cookies").arg(cookies);
+    }
+
+    cmd.arg("-o").arg(&output_path).arg(&url);
+
+    let output = cmd.output().await.context("failed to spawn yt-dlp")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -702,7 +709,7 @@ async fn download_youtube_video(ytdlp_path: PathBuf, url: String) -> anyhow::Res
     tokio::fs::read(&output_path).await.context("failed to read downloaded video")
 }
 
-pub async fn handle_d(ctx: &MessageContext, ytdlp_path: &Path) {
+pub async fn handle_d(ctx: &MessageContext, ytdlp: &YtDlpContext) {
     let text = ctx.message
         .text_content()
         .or_else(|| ctx.message.get_caption())
@@ -753,10 +760,9 @@ pub async fn handle_d(ctx: &MessageContext, ytdlp_path: &Path) {
         ..Default::default()
     }).await;
 
-    let ytdlp_path_owned = ytdlp_path.to_path_buf();
     let download_result = tokio::time::timeout(
         Duration::from_secs(180),
-        download_youtube_video(ytdlp_path_owned, url.clone())
+        download_youtube_video(ytdlp, url.clone())
     ).await;
 
     match download_result {
