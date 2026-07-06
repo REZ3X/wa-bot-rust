@@ -18,6 +18,7 @@ const ANIMATED_STICKER_FPS: f32 = 15.0;
 const FFMPEG_TIMEOUT_SECS: u64 = 60;
 const STICKER_TO_VIDEO_TIMEOUT_SECS: u64 = 240; // animated stickers can have many frames
 const MAX_STICKER_FRAMES: usize = 300; // ~10-12s of animation at typical sticker framerates
+const MAX_VIDEO_DURATION_SECS: u64 = 3600;
 
 pub struct YtDlpContext {
     pub binary_path: PathBuf,
@@ -696,6 +697,43 @@ fn find_youtube_url(text: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Fetches only the video's duration (in seconds) without downloading any
+/// media streams, so we can reject overly long videos before spending time
+/// and bandwidth on an actual download.
+async fn fetch_video_duration(ctx: &YtDlpContext, url: &str) -> anyhow::Result<u64> {
+    let mut cmd = tokio::process::Command::new(&ctx.binary_path);
+    cmd.args([
+        "--print",
+        "%(duration)s",
+        "--skip-download",
+        "--no-playlist",
+        "--no-warnings",
+        "--remote-components",
+        "ejs:github",
+    ]);
+
+    if let Some(cookies) = &ctx.cookies_path {
+        cmd.arg("--cookies").arg(cookies);
+    }
+
+    cmd.arg(url);
+
+    let output = cmd.output().await.context("failed to spawn yt-dlp for duration check")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("yt-dlp exited with {}: {}", output.status, stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let duration_str = stdout.trim();
+
+    duration_str
+        .parse::<f64>()
+        .map(|d| d.round() as u64)
+        .with_context(|| format!("failed to parse duration from yt-dlp output: '{duration_str}'"))
+}
+
 /// Downloads a YouTube video by shelling out to the yt-dlp binary directly.
 async fn download_youtube_video(ctx: &YtDlpContext, url: String) -> anyhow::Result<Vec<u8>> {
     let workdir = tempdir().context("failed to create temporary directory")?;
@@ -778,6 +816,38 @@ pub async fn handle_d(ctx: &MessageContext, ytdlp: &YtDlpContext) {
             return;
         }
     };
+
+let _ = ctx.send_message(wa::Message {
+        conversation: Some("Checking video info...".to_string()),
+        ..Default::default()
+    }).await;
+
+    match tokio::time::timeout(Duration::from_secs(30), fetch_video_duration(ytdlp, &url)).await {
+        Ok(Ok(duration_secs)) => {
+            if duration_secs > MAX_VIDEO_DURATION_SECS {
+                let minutes = duration_secs / 60;
+                let max_minutes = MAX_VIDEO_DURATION_SECS / 60;
+                log::info!("handle_d: rejecting video, duration {duration_secs}s exceeds limit");
+                let _ = ctx.send_message(wa::Message {
+                    conversation: Some(format!(
+                        "This video is about {minutes} minute(s) long, which exceeds the {max_minutes}-minute limit for downloads. Please choose a shorter video."
+                    )),
+                    ..Default::default()
+                }).await;
+                return;
+            }
+            log::info!("handle_d: video duration {duration_secs}s is within limit, proceeding");
+        }
+        Ok(Err(error)) => {
+            // Couldn't determine duration (e.g. live stream, age-gated video,
+            // or a transient extractor issue) — log it but proceed anyway
+            // rather than blocking legitimate downloads on a metadata hiccup.
+            log::warn!("handle_d: failed to fetch video duration, proceeding anyway: {error:?}");
+        }
+        Err(_) => {
+            log::warn!("handle_d: duration check timed out after 30s, proceeding anyway");
+        }
+    }
 
     let _ = ctx.send_message(wa::Message {
         conversation: Some("Downloading video, please wait...".to_string()),
