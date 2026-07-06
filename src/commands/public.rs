@@ -686,7 +686,9 @@ async fn download_youtube_video(ctx: &YtDlpContext, url: String) -> anyhow::Resu
     let mut cmd = tokio::process::Command::new(&ctx.binary_path);
     cmd.args([
         "-f",
-        "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/best",
+        "bv*+ba/b",
+        "-S",
+        "vcodec:h264,acodec:m4a,res:1080",
         "--merge-output-format",
         "mp4",
         "--no-playlist",
