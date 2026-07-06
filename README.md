@@ -1,5 +1,7 @@
 # WhatsApp Bot (Rust)
 
+Version: 0.2.0
+
 A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It operates autonomously in authorized groups, allowing users to convert images, GIFs, and videos into stickers, convert stickers back into images or videos, bypass "view-once" media restrictions, and download YouTube videos.
 
 ## Features
@@ -11,6 +13,7 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
 - **View-Once Resender (`r`)**: Unwraps and resends view-once media as standard media directly to the chat.
 - **Group ID Fetcher (`g`)**: A utility command to fetch the current group JID for configuration purposes.
 - **Help Menu (`h`)**: Lists all available commands directly in chat.
+- **Techstack Menu (`t`)**: Lists all used techstack to built this bot.
 - **YouTube Downloader (`d`)**: Downloads a YouTube video by URL (or from a replied message) and sends it back as a video, with a duration cap to avoid excessively long downloads. Requires a cookies file and a JS runtime (Deno) to work reliably — see [yt-dlp dependency](#yt-dlp-dependency) below.
 
 ## Requirements
