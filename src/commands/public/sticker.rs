@@ -2,7 +2,6 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::path::PathBuf;
 
 use anyhow::Context;
 use ffmpeg_sidecar::{ command::FfmpegCommand, download::auto_download };
@@ -18,85 +17,10 @@ const ANIMATED_STICKER_FPS: f32 = 15.0;
 const FFMPEG_TIMEOUT_SECS: u64 = 60;
 const STICKER_TO_VIDEO_TIMEOUT_SECS: u64 = 240; // animated stickers can have many frames
 const MAX_STICKER_FRAMES: usize = 300; // ~10-12s of animation at typical sticker framerates
-const MAX_VIDEO_DURATION_SECS: u64 = 3600;
-const CARGO_TOML: &str = include_str!("../../Cargo.toml");
-const RUST_TOOLCHAIN_TOML: &str = include_str!("../../rust-toolchain.toml");
 
-fn extract_toml_string_value<'a>(toml: &'a str, key: &str) -> &'a str {
-    toml.lines()
-        .find_map(|line| {
-            let line = line.trim();
-            line.strip_prefix(key)
-                .and_then(|rest| rest.trim_start().strip_prefix('='))
-                .map(|value| value.trim().trim_matches('"'))
-        })
-        .unwrap_or("unknown")
-}
-
-pub async fn handle_t(ctx: &MessageContext) {
-    // CARGO_PKG_NAME / CARGO_PKG_VERSION are populated automatically by Cargo
-    // from Cargo.toml at build time. Cargo does NOT expose an edition env
-    // var, so that (and the toolchain channel) are read from the manifest
-    // files directly at compile time instead.
-    let name = env!("CARGO_PKG_NAME");
-    let version = env!("CARGO_PKG_VERSION");
-    let edition = extract_toml_string_value(CARGO_TOML, "edition");
-    let channel = extract_toml_string_value(RUST_TOOLCHAIN_TOML, "channel");
-
-    let tech_text = format!(
-        "Project: {name} `v{version}`\n\
-         \n\
-         Techstack Used:\n\
-         Rust {edition} Edition\n\
-         Cargo\n\
-         Toolchain `{channel}` channel\n\
-         FFmpeg\n\
-         yt-dlp\n\
-         whatsapp-rust\n\
-         Deno\n\
-         Tokio\n\
-         SQLite\n\
-         \n\
-         For more information, see the project repository:\n\
-         https://github.com/REZ3X/wa-bot-rust
-         "
-    );
-
-    let _ = ctx.send_message(wa::Message {
-        conversation: Some(tech_text),
-        ..Default::default()
-    }).await;
-}
-
-pub struct YtDlpContext {
-    pub binary_path: PathBuf,
-    pub cookies_path: Option<PathBuf>,
-}
-
-pub async fn handle_g(ctx: &MessageContext) {
-    let chat = &ctx.info.source.chat;
-    let _ = ctx.send_message(wa::Message {
-        conversation: Some(chat.to_string()),
-        ..Default::default()
-    }).await;
-}
-
-pub async fn handle_h(ctx: &MessageContext) {
-    let help_text =
-        "Available commands:\n\
-                     g - Get group JID\n\
-                     h - Show this help message\n\
-                     s - Convert image/video to sticker (reply to media)\n\
-                     i - Convert sticker to image/video (reply to sticker)\n\
-                     r - Resend view-once media (reply to view-once message)\n\
-                     t - Show techstack used to build this bot\n\
-                     d - Download YouTube video ('d <url>' or reply with 'd' to a message containing a YouTube URL, maximum 1 hour of duration)\n\
-                     ";
-    let _ = ctx.send_message(wa::Message {
-        conversation: Some(help_text.to_string()),
-        ..Default::default()
-    }).await;
-}
+// ---------------------------------------------------------------------------
+// Image / WebP / FFmpeg conversion helpers
+// ---------------------------------------------------------------------------
 
 fn resize_into_sticker_canvas(image: &image::DynamicImage) -> image::DynamicImage {
     let (width, height) = image.dimensions();
@@ -424,6 +348,10 @@ async fn run_blocking<F, T>(f: F, timeout_secs: u64) -> anyhow::Result<T>
     }
 }
 
+// ---------------------------------------------------------------------------
+// Command handlers
+// ---------------------------------------------------------------------------
+
 pub async fn handle_s(ctx: &MessageContext) {
     let mut target_msg = None;
 
@@ -486,7 +414,7 @@ pub async fn handle_s(ctx: &MessageContext) {
                     ctx.client.upload(webp_data, MediaType::Sticker, UploadOptions::default()).await
                 {
                     Ok(upload) => {
-                        let reply = wa::Message {
+                        let mut reply = wa::Message {
                             sticker_message: buffa::MessageField::some(wa::message::StickerMessage {
                                 url: Some(upload.url),
                                 direct_path: Some(upload.direct_path),
@@ -503,32 +431,24 @@ pub async fn handle_s(ctx: &MessageContext) {
                             }),
                             ..Default::default()
                         };
+                        reply.set_context_info(ctx.build_quote_context());
                         let _ = ctx.send_message(reply).await;
                     }
                     Err(error) => {
                         log::error!("handle_s: sticker upload failed: {error:?}");
-                        let _ = ctx.send_message(wa::Message {
-                            conversation: Some("Failed to upload sticker.".to_string()),
-                            ..Default::default()
-                        }).await;
+                        let _ = ctx.reply_quoting("Failed to upload sticker.").await;
                     }
                 }
             }
             Err(error) => {
                 log::error!("handle_s: sticker conversion failed: {error:?}");
-                let _ = ctx.send_message(wa::Message {
-                    conversation: Some("Failed to convert media to sticker.".to_string()),
-                    ..Default::default()
-                }).await;
+                let _ = ctx.reply_quoting("Failed to convert media to sticker.").await;
             }
         }
     } else {
-        let _ = ctx.send_message(wa::Message {
-            conversation: Some(
-                "Please reply to an image, GIF, or video with 's' to convert it to a sticker.".to_string()
-            ),
-            ..Default::default()
-        }).await;
+        let _ = ctx.reply_quoting(
+            "Please reply to an image, GIF, or video with 's' to convert it to a sticker."
+        ).await;
     }
 }
 
@@ -548,12 +468,9 @@ pub async fn handle_i(ctx: &MessageContext) {
     }
 
     let Some(msg) = target_msg else {
-        let _ = ctx.send_message(wa::Message {
-            conversation: Some(
-                "Please reply to a sticker with 'i' to convert it to an image.".to_string()
-            ),
-            ..Default::default()
-        }).await;
+        let _ = ctx.reply_quoting(
+            "Please reply to a sticker with 'i' to convert it to an image."
+        ).await;
         return;
     };
 
@@ -568,10 +485,7 @@ pub async fn handle_i(ctx: &MessageContext) {
         }
         Err(error) => {
             log::error!("handle_i: sticker download failed: {error:?}");
-            let _ = ctx.send_message(wa::Message {
-                conversation: Some("Failed to download sticker.".to_string()),
-                ..Default::default()
-            }).await;
+            let _ = ctx.reply_quoting("Failed to download sticker.").await;
             return;
         }
     };
@@ -595,7 +509,7 @@ pub async fn handle_i(ctx: &MessageContext) {
             Ok(mp4_data) => {
                 match ctx.client.upload(mp4_data, MediaType::Video, UploadOptions::default()).await {
                     Ok(upload) => {
-                        let reply = wa::Message {
+                        let mut reply = wa::Message {
                             video_message: buffa::MessageField::some(wa::message::VideoMessage {
                                 url: Some(upload.url),
                                 direct_path: Some(upload.direct_path),
@@ -609,14 +523,12 @@ pub async fn handle_i(ctx: &MessageContext) {
                             }),
                             ..Default::default()
                         };
+                        reply.set_context_info(ctx.build_quote_context());
                         let _ = ctx.send_message(reply).await;
                     }
                     Err(error) => {
                         log::error!("handle_i: video upload failed: {error:?}");
-                        let _ = ctx.send_message(wa::Message {
-                            conversation: Some("Failed to upload video.".to_string()),
-                            ..Default::default()
-                        }).await;
+                        let _ = ctx.reply_quoting("Failed to upload video.").await;
                     }
                 }
             }
@@ -630,10 +542,7 @@ pub async fn handle_i(ctx: &MessageContext) {
                 } else {
                     "Failed to convert animated sticker to video."
                 };
-                let _ = ctx.send_message(wa::Message {
-                    conversation: Some(msg.to_string()),
-                    ..Default::default()
-                }).await;
+                let _ = ctx.reply_quoting(msg).await;
             }
         }
         return;
@@ -644,7 +553,7 @@ pub async fn handle_i(ctx: &MessageContext) {
         Ok(img_data) => {
             match ctx.client.upload(img_data, MediaType::Image, UploadOptions::default()).await {
                 Ok(upload) => {
-                    let reply = wa::Message {
+                    let mut reply = wa::Message {
                         image_message: buffa::MessageField::some(wa::message::ImageMessage {
                             url: Some(upload.url),
                             direct_path: Some(upload.direct_path),
@@ -658,301 +567,18 @@ pub async fn handle_i(ctx: &MessageContext) {
                         }),
                         ..Default::default()
                     };
+                    reply.set_context_info(ctx.build_quote_context());
                     let _ = ctx.send_message(reply).await;
                 }
                 Err(error) => {
                     log::error!("handle_i: image upload failed: {error:?}");
-                    let _ = ctx.send_message(wa::Message {
-                        conversation: Some("Failed to upload image.".to_string()),
-                        ..Default::default()
-                    }).await;
+                    let _ = ctx.reply_quoting("Failed to upload image.").await;
                 }
             }
         }
         Err(error) => {
             log::error!("handle_i: sticker->image conversion failed: {error:?}");
-            let _ = ctx.send_message(wa::Message {
-                conversation: Some("Failed to convert sticker to image.".to_string()),
-                ..Default::default()
-            }).await;
-        }
-    }
-}
-
-// handle_r temporarily placed as public command
-
-pub async fn handle_r(ctx: &MessageContext) {
-    let mut target_msg = None;
-
-    if let Some(ext) = ctx.message.extended_text_message.as_option() {
-        if let Some(ctx_info) = ext.context_info.as_option() {
-            if let Some(quoted) = ctx_info.quoted_message.as_option() {
-                target_msg = Some(Arc::new(quoted.clone()));
-            }
-        }
-    }
-
-    if let Some(msg) = target_msg {
-        if msg.is_view_once() {
-            let base = msg.get_base_message();
-
-            if let Some(img) = base.image_message.as_option() {
-                let mut new_img = img.clone();
-                new_img.view_once = Some(false);
-                new_img.caption = None;
-                let reply = wa::Message {
-                    image_message: buffa::MessageField::some(new_img),
-                    ..Default::default()
-                };
-                let _ = ctx.send_message(reply).await;
-            } else if let Some(vid) = base.video_message.as_option() {
-                let mut new_vid = vid.clone();
-                new_vid.view_once = Some(false);
-                let reply = wa::Message {
-                    video_message: buffa::MessageField::some(new_vid),
-                    ..Default::default()
-                };
-                let _ = ctx.send_message(reply).await;
-            } else {
-                let _ = ctx.send_message(wa::Message {
-                    conversation: Some(
-                        "The view-once message did not contain an image or video.".to_string()
-                    ),
-                    ..Default::default()
-                }).await;
-            }
-        } else {
-            let _ = ctx.send_message(wa::Message {
-                conversation: Some(
-                    "The replied message is not a view-once media message.".to_string()
-                ),
-                ..Default::default()
-            }).await;
-        }
-    } else {
-        let _ = ctx.send_message(wa::Message {
-            conversation: Some(
-                "Please reply to a view-once image or video with 'r' to resend it.".to_string()
-            ),
-            ..Default::default()
-        }).await;
-    }
-}
-
-fn find_youtube_url(text: &str) -> Option<String> {
-    text.split_whitespace()
-        .find(|word| (word.contains("youtube.com/") || word.contains("youtu.be/")))
-        .map(|s| s.trim().to_string())
-}
-
-/// Fetches only the video's duration (in seconds) without downloading any
-/// media streams, so we can reject overly long videos before spending time
-/// and bandwidth on an actual download.
-async fn fetch_video_duration(ctx: &YtDlpContext, url: &str) -> anyhow::Result<u64> {
-    let mut cmd = tokio::process::Command::new(&ctx.binary_path);
-    cmd.args([
-        "--print",
-        "%(duration)s",
-        "--skip-download",
-        "--no-playlist",
-        "--no-warnings",
-        "--remote-components",
-        "ejs:github",
-    ]);
-
-    if let Some(cookies) = &ctx.cookies_path {
-        cmd.arg("--cookies").arg(cookies);
-    }
-
-    cmd.arg(url);
-
-    let output = cmd.output().await.context("failed to spawn yt-dlp for duration check")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("yt-dlp exited with {}: {}", output.status, stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let duration_str = stdout.trim();
-
-    duration_str
-        .parse::<f64>()
-        .map(|d| d.round() as u64)
-        .with_context(|| format!("failed to parse duration from yt-dlp output: '{duration_str}'"))
-}
-
-/// Downloads a YouTube video by shelling out to the yt-dlp binary directly.
-async fn download_youtube_video(ctx: &YtDlpContext, url: String) -> anyhow::Result<Vec<u8>> {
-    let workdir = tempdir().context("failed to create temporary directory")?;
-    let output_path = workdir.path().join("video.mp4");
-
-    log::info!("download_youtube_video: fetching {url}");
-
-    let mut cmd = tokio::process::Command::new(&ctx.binary_path);
-    cmd.args([
-        "-f",
-        "bv*+ba/b",
-        "-S",
-        "vcodec:h264,acodec:m4a,res:1080",
-        "--merge-output-format",
-        "mp4",
-        "--no-playlist",
-        "--no-warnings",
-        "--remote-components",
-        "ejs:github",
-    ]);
-
-    if let Some(cookies) = &ctx.cookies_path {
-        cmd.arg("--cookies").arg(cookies);
-    }
-
-    cmd.arg("-o").arg(&output_path).arg(&url);
-
-    let output = cmd.output().await.context("failed to spawn yt-dlp")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("yt-dlp exited with {}: {}", output.status, stderr.trim());
-    }
-
-    tokio::fs::read(&output_path).await.context("failed to read downloaded video")
-}
-
-pub async fn handle_d(ctx: &MessageContext, ytdlp: &YtDlpContext) {
-    let text = ctx.message
-        .text_content()
-        .or_else(|| ctx.message.get_caption())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    let url = if text.starts_with("d ") {
-        find_youtube_url(text[2..].trim())
-    } else if text == "d" {
-        let mut quoted_url = None;
-        if let Some(ext) = ctx.message.extended_text_message.as_option() {
-            if let Some(ctx_info) = ext.context_info.as_option() {
-                if let Some(quoted) = ctx_info.quoted_message.as_option() {
-                    if let Some(conv) = quoted.conversation.as_ref() {
-                        quoted_url = find_youtube_url(conv);
-                    }
-                    if quoted_url.is_none() {
-                        if let Some(ext_text) = quoted.extended_text_message.as_option() {
-                            if let Some(text) = ext_text.text.as_ref() {
-                                quoted_url = find_youtube_url(text);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        quoted_url
-    } else {
-        None
-    };
-
-    let url = match url {
-        Some(u) => u,
-        None => {
-            let _ = ctx.send_message(wa::Message {
-                conversation: Some(
-                    "Usage: 'd <YouTube URL>' or reply to a message containing a YouTube URL with 'd'.".to_string()
-                ),
-                ..Default::default()
-            }).await;
-            return;
-        }
-    };
-
-    let _ = ctx.send_message(wa::Message {
-        conversation: Some("Checking video info...".to_string()),
-        ..Default::default()
-    }).await;
-
-    match tokio::time::timeout(Duration::from_secs(30), fetch_video_duration(ytdlp, &url)).await {
-        Ok(Ok(duration_secs)) => {
-            if duration_secs > MAX_VIDEO_DURATION_SECS {
-                let minutes = duration_secs / 60;
-                let max_minutes = MAX_VIDEO_DURATION_SECS / 60;
-                log::info!("handle_d: rejecting video, duration {duration_secs}s exceeds limit");
-                let _ = ctx.send_message(wa::Message {
-                    conversation: Some(
-                        format!(
-                            "This video is about {minutes} minute(s) long, which exceeds the {max_minutes}-minute limit for downloads. Please choose a shorter video."
-                        )
-                    ),
-                    ..Default::default()
-                }).await;
-                return;
-            }
-            log::info!("handle_d: video duration {duration_secs}s is within limit, proceeding");
-        }
-        Ok(Err(error)) => {
-            // Couldn't determine duration (e.g. live stream, age-gated video,
-            // or a transient extractor issue) — log it but proceed anyway
-            // rather than blocking legitimate downloads on a metadata hiccup.
-            log::warn!("handle_d: failed to fetch video duration, proceeding anyway: {error:?}");
-        }
-        Err(_) => {
-            log::warn!("handle_d: duration check timed out after 30s, proceeding anyway");
-        }
-    }
-
-    let _ = ctx.send_message(wa::Message {
-        conversation: Some("Downloading video, please wait...".to_string()),
-        ..Default::default()
-    }).await;
-
-    let download_result = tokio::time::timeout(
-        Duration::from_secs(180),
-        download_youtube_video(ytdlp, url.clone())
-    ).await;
-
-    match download_result {
-        Ok(Ok(video_data)) => {
-            log::info!("handle_d: downloaded {} bytes, uploading", video_data.len());
-            match ctx.client.upload(video_data, MediaType::Video, UploadOptions::default()).await {
-                Ok(upload) => {
-                    let reply = wa::Message {
-                        video_message: buffa::MessageField::some(wa::message::VideoMessage {
-                            url: Some(upload.url),
-                            direct_path: Some(upload.direct_path),
-                            media_key: Some(upload.media_key.to_vec()),
-                            file_sha256: Some(upload.file_sha256.to_vec()),
-                            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
-                            file_length: Some(upload.file_length),
-                            media_key_timestamp: Some(upload.media_key_timestamp),
-                            mimetype: Some("video/mp4".to_string()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    };
-                    let _ = ctx.send_message(reply).await;
-                }
-                Err(e) => {
-                    log::error!("handle_d: video upload failed: {e:?}");
-                    let _ = ctx.send_message(wa::Message {
-                        conversation: Some("Failed to upload video.".to_string()),
-                        ..Default::default()
-                    }).await;
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            log::error!("handle_d: download failed: {e:?}");
-            let _ = ctx.send_message(wa::Message {
-                conversation: Some(format!("Failed to download video: {e}")),
-                ..Default::default()
-            }).await;
-        }
-        Err(_) => {
-            let _ = ctx.send_message(wa::Message {
-                conversation: Some(
-                    "Download timed out. The video may be too large or restricted.".to_string()
-                ),
-                ..Default::default()
-            }).await;
+            let _ = ctx.reply_quoting("Failed to convert sticker to image.").await;
         }
     }
 }
