@@ -29,16 +29,21 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>, ytdlp_ctx:
     let is_group = chat.is_group();
     let is_allowed_group = is_group && config.is_group_allowed(&chat.to_string());
 
-    // Only whitelisted groups are allowed. The bot is completely silent in
-    // private DMs and non-whitelisted groups — no response, no indication
-    // it exists.
-    if !is_allowed_group {
+    // Tier 1: completely silent in private DMs — no response, no indication the bot exists.
+    if !is_group {
         return;
     }
 
+    // Tier 2: 'c' works in any group (whitelisted or not) so users can retrieve
+    // the chat JID needed to add it to the whitelist.
     if text_content == "c" {
         log::info!("dispatch: 'c' command from {sender}");
         commands::public::handle_c(&ctx).await;
+        return;
+    }
+
+    // Tier 3: all other commands require the group to be whitelisted.
+    if !is_allowed_group {
         return;
     }
 

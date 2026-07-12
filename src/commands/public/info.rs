@@ -54,7 +54,7 @@ pub async fn handle_c(ctx: &MessageContext) {
 pub async fn handle_h(ctx: &MessageContext) {
     let help_text =
         "Available commands:\n\
-                     c - Get chat JID (works in groups and DMs)\n\
+                     c - Get chat JID (works in all groups, even non-whitelisted)\n\
                      h - Show this help message\n\
                      s - Convert image/video to sticker (reply to media)\n\
                      i - Convert sticker to image/video (reply to sticker)\n\
