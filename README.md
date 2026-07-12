@@ -2,16 +2,16 @@
 
 Version: 0.2.0
 
-A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It operates autonomously in authorized groups, allowing users to convert images, GIFs, and videos into stickers, convert stickers back into images or videos, bypass "view-once" media restrictions, and download YouTube videos.
+A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It operates autonomously in authorized groups, allowing users to convert images, GIFs, and videos into stickers, convert stickers back into images or videos, bypass "view-once" media restrictions, and download YouTube videos. The bot is completely silent in private DMs and non-whitelisted groups.
 
 ## Features
 
 - **Persistent Authentication**: Powered by a local SQLite store (`creds/whatsapp.db`) to avoid re-scanning QR codes on restarts.
-- **Group Restrictions**: Only operates in specific, allowed groups defined via environment variables.
-- **Sticker Maker (`s`)**: Converts replied images, GIFs, or videos into WebP stickers (512x512), producing static stickers for images and animated stickers for GIFs/videos.
+- **Group Restrictions**: Only operates in specific, allowed groups defined via environment variables. The bot is completely silent in private DMs and non-whitelisted groups — it sends no response and gives no indication it exists.
+- **Sticker Maker (`s`)**: Converts replied images, GIFs, or videos into WebP stickers (512x512), producing static stickers for images and animated stickers for GIFs/videos. View-once media is explicitly excluded — use `r` to handle those.
 - **Sticker Unpacker (`i`)**: Converts a replied sticker back to media — a static sticker becomes a JPEG image, and an animated sticker becomes an MP4 video.
 - **View-Once Resender (`r`)**: Unwraps and resends view-once media as standard media directly to the chat.
-- **Group ID Fetcher (`g`)**: A utility command to fetch the current group JID for configuration purposes.
+- **Chat ID Fetcher (`c`)**: A utility command to fetch the current chat JID (works in any whitelisted group) for configuration purposes.
 - **Help Menu (`h`)**: Lists all available commands directly in chat.
 - **Techstack Menu (`t`)**: Lists all used techstack to built this bot.
 - **YouTube Downloader (`d`)**: Downloads a YouTube video by URL (or from a replied message) and sends it back as a video, with a duration cap to avoid excessively long downloads. Requires a cookies file and a JS runtime (Deno) to work reliably — see [yt-dlp dependency](#yt-dlp-dependency) below.
@@ -55,8 +55,8 @@ A feature-rich WhatsApp Bot built in Rust using the `whatsapp-rust` library. It 
 
 All commands are invoked by sending the exact string or replying to media with the string.
 
-- `g` - Prints the internal Group ID (JID) of the current chat. Use this to easily find the ID to whitelist in `.env`.
-- `s` - Reply to an Image, GIF, or Video with `s` to generate a WhatsApp sticker.
+- `c` - Prints the internal chat JID of the current group. Use this to easily find the ID to whitelist in `.env`.
+- `s` - Reply to an Image, GIF, or Video with `s` to generate a WhatsApp sticker. View-once media is rejected — use `r` for those.
   - **Image** → static WebP sticker, resized and letterboxed to fit a 512x512 canvas.
   - **GIF** → animated WebP sticker, decoded and re-encoded frame-by-frame in pure Rust (no ffmpeg needed for this path).
   - **Video** (or animated WebP input) → animated WebP sticker via ffmpeg, resampled to 15fps and scaled/padded to 512x512.

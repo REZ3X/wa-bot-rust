@@ -46,7 +46,7 @@ pub async fn handle_t(ctx: &MessageContext) {
     let _ = ctx.reply_quoting(&tech_text).await;
 }
 
-pub async fn handle_g(ctx: &MessageContext) {
+pub async fn handle_c(ctx: &MessageContext) {
     let chat = &ctx.info.source.chat;
     let _ = ctx.reply_quoting(&chat.to_string()).await;
 }
@@ -54,7 +54,7 @@ pub async fn handle_g(ctx: &MessageContext) {
 pub async fn handle_h(ctx: &MessageContext) {
     let help_text =
         "Available commands:\n\
-                     g - Get group JID\n\
+                     c - Get chat JID (works in groups and DMs)\n\
                      h - Show this help message\n\
                      s - Convert image/video to sticker (reply to media)\n\
                      i - Convert sticker to image/video (reply to sticker)\n\

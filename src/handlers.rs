@@ -29,8 +29,16 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>, ytdlp_ctx:
     let is_group = chat.is_group();
     let is_allowed_group = is_group && config.is_group_allowed(&chat.to_string());
 
-    if text_content == "g" {
-        commands::public::handle_g(&ctx).await;
+    // Only whitelisted groups are allowed. The bot is completely silent in
+    // private DMs and non-whitelisted groups — no response, no indication
+    // it exists.
+    if !is_allowed_group {
+        return;
+    }
+
+    if text_content == "c" {
+        log::info!("dispatch: 'c' command from {sender}");
+        commands::public::handle_c(&ctx).await;
         return;
     }
 
@@ -43,10 +51,6 @@ pub async fn handle_message(ctx: MessageContext, config: Arc<Config>, ytdlp_ctx:
     if text_content == "t" {
         log::info!("dispatch: 't' command from {sender}");
         commands::public::handle_t(&ctx).await;
-        return;
-    }
-
-    if is_group && !is_allowed_group {
         return;
     }
 

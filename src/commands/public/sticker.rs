@@ -356,16 +356,16 @@ pub async fn handle_s(ctx: &MessageContext) {
     let mut target_msg = None;
 
     if
-        ctx.message.image_message.as_option().is_some() ||
-        ctx.message.video_message.as_option().is_some()
+        ctx.message.image_message.as_option().is_some_and(|img| img.view_once != Some(true)) ||
+        ctx.message.video_message.as_option().is_some_and(|vid| vid.view_once != Some(true))
     {
         target_msg = Some(ctx.message.clone());
     } else if let Some(ext) = ctx.message.extended_text_message.as_option() {
         if let Some(ctx_info) = ext.context_info.as_option() {
             if let Some(quoted) = ctx_info.quoted_message.as_option() {
                 if
-                    quoted.image_message.as_option().is_some() ||
-                    quoted.video_message.as_option().is_some()
+                    quoted.image_message.as_option().is_some_and(|img| img.view_once != Some(true)) ||
+                    quoted.video_message.as_option().is_some_and(|vid| vid.view_once != Some(true))
                 {
                     target_msg = Some(Arc::new(quoted.clone()));
                 }
